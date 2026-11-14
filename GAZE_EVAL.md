@@ -6,6 +6,22 @@ Two other changes went in at the same time (neither has been tested with a real 
 - **Wider line spacing** in the reader (2.5× the font size instead of 2×), so lines are 50 px apart at the default size.
 - **Stretch correction.** The tracker already learned a vertical *offset* from the first line of each page. It now also learns a vertical *stretch*: when you read down a page and turn it with the keyboard, your eyes were on the last line, so the distance the camera saw between first and last line, compared with the real distance, gives the stretch. `npx tsx scripts/simulate-pages.ts` shows the effect: with the gaze squashed to 85%, exact-line accuracy goes from about 34% to 58%, with no change when there is no stretch.
 
+**Update (2026-11-14, evening): fixes from a review of the merged tracker.** Checked with `npm run simulate:behaviors` (noise 80 px) and the existing simulations; not yet with a real webcam.
+
+| | Before | After |
+|---|---|---|
+| 45 s staring beside the text, counted as off the text | 6 s | 43 s |
+| Reading only the first half of each line, reported as skimmed | 10 to 16% | 81 to 95% |
+| A paragraph read twice also flags the paragraph above it | 45% | 2% |
+| One line read twice, flagged | 2 to 7% | 32 to 47% (65% at noise 50) |
+| Normal reading reported correctly | 94 to 96% | 99 to 100% |
+
+- **Sideways correction only learns while reading** (within 6 s of the last end-of-line jump). It assumes the gaze should be centred on the text column, which is only true then; before, looking beside the page was slowly "corrected" back onto it and counted as reading.
+- **Words near the eyes get most of a frame's time** (60% by left-right position, 40% evenly across the line), so a half-read line is no longer a fully read one.
+- **A jump back flags a paragraph only if it covers 45% of it**, or the paragraph holds half of the re-read run. The run's first line is often one too high.
+- **Passes:** each return sweep or forward page turn finishes one pass of a line; extra passes plus extra time flag a single re-read line. Skipped next to a paragraph the jump-back detector already flagged.
+- **Saved calibrations are only reused on the screen they were made on** (`sameScreen` in `savedCalibration.ts`); another computer or monitor asks for a new one.
+
 ## WebEyeTrack: what it is and what it needs
 
 | | |

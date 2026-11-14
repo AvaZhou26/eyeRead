@@ -106,11 +106,50 @@ const HIST_GAP_SEC = 0.3;
 const X_WINDOW_SEC = 15;
 const X_MIN_SEC = 3;
 const X_TAU_SEC = 3;
+/**
+ * The sideways correction only learns while you are actually reading: within this many
+ * seconds of the last big leftward jump (the end of a line). Its assumption, "the gaze should
+ * be centred on the text column", is only true then. Without this, looking at something
+ * beside the text (a phone, a sidebar) was slowly "corrected" back onto the page and counted
+ * as reading. Reading a line takes about 2.5 s, 5 s for a slow reader.
+ */
+const X_ACTIVE_SEC = 6;
+/**
+ * How a frame's time on a line is shared among that line's words: this share goes evenly to
+ * every word, the rest goes to the words near where the eyes are, left to right. Left-right
+ * is the webcam's better axis, so this is what separates "read the whole line" from "read
+ * the first half and dropped down" (skimming). The even share keeps a leftover sideways
+ * offset from starving the words at one end of every line.
+ */
+const EVEN_SHARE = 0.4;
+/**
+ * A jump back marks a run of lines as re-read. A paragraph is only flagged when the run
+ * covers at least this share of it, or the paragraph holds at least half of the run. The
+ * start of a run is often one line too high (gaze noise), which used to flag the paragraph
+ * ABOVE the one that was really re-read, on the strength of its last line.
+ */
+const REREAD_PARA_SHARE = 0.45;
+/**
+ * Re-reading by passes (catches a single line read twice, which never moves the eyes far
+ * enough up the page for the jump-back detector). Every return sweep, and every forward page
+ * turn, finishes one "pass" of the line the eyes were on. A paragraph counts as re-read when
+ * it got at least EXTRA_PASS_LINES lines' worth of passes beyond one read AND at least
+ * EXTRA_TIME_LINES lines' worth of extra time. Either alone is too easy to get by accident.
+ * Checked with a simulated mix of reading, skimming and re-reading: about 4 in 10 single
+ * re-read lines caught, about 1 in 1,000 normally read paragraphs flagged by mistake. Lower
+ * values (0.5 / 0.2) catch a few more and flag about 1 in 100.
+ */
+const EXTRA_PASS_LINES = 0.6;
+const EXTRA_TIME_LINES = 0.3;
 const SETTLE_BEFORE = 0.75;
 
 export class ReadingTracker {
   readonly wordDwell: Float64Array;
   readonly wordRereads: Int32Array;
+  /** How many times each word's line was read to its end (see EXTRA_PASS_LINES). */
+  private wordPasses: Float32Array;
+  private lineWordsSum = 0;
+  private lineWordsN = 0;
   private hmm: LineHmm;
   private lines: LineBox[] = [];
   private page = 0;
@@ -194,6 +233,7 @@ export class ReadingTracker {
   constructor(private opts: Options, now: number) {
     this.wordDwell = new Float64Array(opts.totalWords);
     this.wordRereads = new Int32Array(opts.totalWords);
+    this.wordPasses = new Float32Array(opts.totalWords);
     this.hmm = new LineHmm(opts.sigmaY, Math.max(60, opts.sigmaY));
     this.hmm.biasY = opts.initialBiasY;
     this.pageBias = opts.initialBiasY;
@@ -274,7 +314,15 @@ export class ReadingTracker {
     if (reason === "turn" && page !== prevPage) {
       this.pagesTurned++;
       if (page > prevPage) this.checkRushedPage(prevLines, prevPage, now);
+      // Turning forward ends a pass of the last line you were on (there's no sweep to see).
+      if (page === prevPage + 1 && this.opts.mode === "gaze" && !this.anchoring && (this.state === "reading" || this.state === "skimming")) this.countPass();
       if (page === prevPage + 1 && byKeyboard) this.learnGain(prevLines, now);
+    }
+    if (page !== this.page || !this.lineWordsN) {
+      for (const l of lines) {
+        this.lineWordsSum += l.lastWord - l.firstWord + 1;
+        this.lineWordsN++;
+      }
     }
     this.lines = lines;
     this.page = page;
@@ -449,7 +497,10 @@ export class ReadingTracker {
         this.hmm.pin(0);
         this.visit = [];
         this.visitStart = now;
-        if (sweep) this.hmm.predict(dt, jump ?? true);
+        if (sweep) {
+          this.countPass();
+          this.hmm.predict(dt, jump ?? true);
+        }
       } else {
         this.hmm.pin(0);
       }
@@ -459,6 +510,7 @@ export class ReadingTracker {
         this.hmm.biasY = Math.max(this.pageBias - cap, Math.min(this.pageBias + cap, this.hmm.biasY + this.biasRate * dt));
       }
       if (jump) this.learnBiasFromLine(now);
+      if (sweep) this.countPass();
       this.hmm.predict(dt, jump ?? false);
       if (inst === "away") this.hmm.observe(null, true, dt);
       else if (gaze && frame?.features) {
@@ -495,12 +547,30 @@ export class ReadingTracker {
     const nowOnText = this.state === "reading" || this.state === "skimming" || this.state === "pausing";
     if (nowOnText && lines.length) {
       if (mode === "gaze") {
+        // The quicker-reacting gaze point follows the eyes along the line; the smooth one lags.
+        const x = frame?.features ? (gazeFast ?? gaze)?.x : undefined;
         for (let i = 0; i < lines.length; i++) {
           const share = this.hmm.p[i] * dt;
           if (share < 1e-5) continue;
           const L = lines[i];
-          const per = share / this.wordsIn(L);
-          for (let w = L.firstWord; w <= L.lastWord; w++) this.wordDwell[w] += per;
+          const n = this.wordsIn(L);
+          const per = share / n;
+          if (x === undefined || n < 3) {
+            for (let w = L.firstWord; w <= L.lastWord; w++) this.wordDwell[w] += per;
+            continue;
+          }
+          // Part evenly, part to the words near the eyes (see EVEN_SHARE).
+          const width = L.right - L.left;
+          const sx = Math.max(50, 0.12 * width);
+          if (this.scratch.length < n) this.scratch = new Float64Array(n * 2);
+          const wts = this.scratch;
+          let sum = 0;
+          for (let k = 0; k < n; k++) {
+            const z = (x - (L.left + ((k + 0.5) / n) * width)) / sx;
+            sum += wts[k] = Math.exp(-0.5 * z * z) + 1e-9;
+          }
+          const near = (share * (1 - EVEN_SHARE)) / sum;
+          for (let k = 0; k < n; k++) this.wordDwell[L.firstWord + k] += per * EVEN_SHARE + near * wts[k];
         }
       } else {
         // Without gaze we only know you're facing the page: spread time evenly over it.
@@ -564,6 +634,7 @@ export class ReadingTracker {
   private learnXShift(rawX: number, now: number, dt: number) {
     const lines = this.lines;
     if (!lines.length) return;
+    if (now - this.lastSweep > X_ACTIVE_SEC) return; // not reading right now: see X_ACTIVE_SEC
     this.xHist.push({ t: now, x: rawX });
     while (this.xHist.length && now - this.xHist[0].t > X_WINDOW_SEC) this.xHist.shift();
     if (now - this.xHist[0].t < X_MIN_SEC) return;
@@ -744,6 +815,21 @@ export class ReadingTracker {
     if (run) this.addRegression(run);
   }
 
+  private scratch = new Float64Array(64);
+
+  /** The eyes just finished a line (return sweep or page turn): credit one pass, shared among the lines by how likely each is. */
+  private countPass() {
+    const lines = this.lines;
+    let onLines = 0;
+    for (let i = 0; i < lines.length; i++) onLines += this.hmm.p[i];
+    if (onLines < 0.2) return;
+    for (let i = 0; i < lines.length; i++) {
+      const p = this.hmm.p[i] / onLines;
+      if (p < 0.01) continue;
+      for (let w = lines[i].firstWord; w <= lines[i].lastWord; w++) this.wordPasses[w] += p;
+    }
+  }
+
   private addRegression(r: { from: number; to: number }) {
     for (let w = r.from; w <= r.to; w++) this.wordRereads[w]++;
     this.regressions.push(r);
@@ -844,9 +930,13 @@ export class ReadingTracker {
       }
     }
     for (const reg of this.regressions) {
-      const touched = new Set<number>();
-      for (let w = reg.from; w <= reg.to; w++) touched.add(wordParagraph[w]);
-      touched.forEach((p) => paraStats[p].rereads++);
+      const touched = new Map<number, number>(); // paragraph → words of it in this run
+      for (let w = reg.from; w <= reg.to; w++) touched.set(wordParagraph[w], (touched.get(wordParagraph[w]) ?? 0) + 1);
+      const runWords = reg.to - reg.from + 1;
+      // See REREAD_PARA_SHARE: a paragraph only clipped at its edge isn't "re-read".
+      touched.forEach((n, p) => {
+        if (n >= REREAD_PARA_SHARE * Math.max(1, paraStats[p].words) || n >= 0.5 * runWords) paraStats[p].rereads++;
+      });
     }
     paraStats.forEach((s, p) => {
       const n = Math.max(1, s.words);
@@ -863,6 +953,19 @@ export class ReadingTracker {
     // Lingering far longer than YOUR usual pace on a paragraph also signals re-reading / struggle.
     const ratios = paraStats.filter((p) => p.status === "read" && p.words >= 8).map((p) => p.dwellSec / p.expectedSec).sort((a, b) => a - b);
     const typical = ratios.length ? ratios[ratios.length >> 1] : 1;
+    // Lines read twice: more passes than one read needs, with the extra time to match.
+    const passWords = new Array(paraStats.length).fill(0);
+    for (let w = 0; w < totalWords; w++) passWords[wordParagraph[w]] += this.wordPasses[w];
+    const lineWords = this.lineWordsN ? this.lineWordsSum / this.lineWordsN : 11;
+    // Not next to a paragraph the jump-back detector already flagged: going back over a whole
+    // paragraph spills a little extra time and passes onto its neighbours.
+    const jumpedBack = paraStats.map((p) => p.rereads > 0);
+    paraStats.forEach((p, i) => {
+      if (p.rereads > 0 || p.status !== "read" || p.words < 8 || jumpedBack[i - 1] || jumpedBack[i + 1]) return;
+      const extraPassWords = passWords[i] - p.words;
+      const extraSec = p.dwellSec - typical * p.expectedSec;
+      if (extraPassWords >= EXTRA_PASS_LINES * lineWords && extraSec >= EXTRA_TIME_LINES * lineWords * this.spw) p.rereads = 1;
+    });
     for (const p of paraStats) {
       if (p.rereads === 0 && p.status === "read" && p.words >= 8 && p.dwellSec / p.expectedSec >= Math.max(1, typical * 1.6)) p.rereads = 1;
     }

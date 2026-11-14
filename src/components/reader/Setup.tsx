@@ -40,6 +40,7 @@ export function Setup({
   onCalibrate,
   onSkipTracking,
   savedCalibrationAt = null,
+  calibrationNote = null,
   onUseSaved,
   title,
   backHref,
@@ -53,6 +54,8 @@ export function Setup({
   onSkipTracking: (mode: "attention" | "none") => void;
   /** When the student's saved calibration (usable on this screen) was made; null = none. */
   savedCalibrationAt?: string | null;
+  /** Why a saved calibration isn't being offered (shown under Calibrate & start); null = nothing to say. */
+  calibrationNote?: string | null;
   /** Start reading with the saved calibration. */
   onUseSaved?: () => void;
   title: string;
@@ -229,9 +232,12 @@ export function Setup({
                 </p>
               </div>
             ) : (
-              <button className="btn btn-primary w-full !py-2.5" disabled={cameraState !== "on" || !ready} onClick={onCalibrate}>
-                Calibrate &amp; start
-              </button>
+              <>
+                <button className="btn btn-primary w-full !py-2.5" disabled={cameraState !== "on" || !ready} onClick={onCalibrate}>
+                  Calibrate &amp; start
+                </button>
+                {calibrationNote && <p className="text-xs text-muted leading-relaxed">{calibrationNote}</p>}
+              </>
             )}
             {cameraState === "on" && !ready && (
               <p className="text-xs font-medium text-skip" role="status">

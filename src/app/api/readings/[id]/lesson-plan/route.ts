@@ -1,5 +1,5 @@
 import { getCurrentUser } from "@/lib/auth";
-import { getCourse, getReading, saveLessonPlan, sessionsForReading, studentsInCourse } from "@/lib/db";
+import { getCourse, getLessonPlan, getReading, saveLessonPlan, sessionsForReading, studentsInCourse } from "@/lib/db";
 import { generateLessonPlan } from "@/lib/gemini";
 import { aggregateParagraphs, bestPerStudent } from "@/lib/insights";
 
@@ -19,6 +19,9 @@ export async function POST(_req: Request, ctx: RouteContext<"/api/readings/[id]/
     avgFocus: avg(best.map((s) => s.report.focusPct)),
     notStarted: Math.max(0, students.length - best.length),
   });
+  // Gemini didn't answer this time: keep a plan it wrote earlier rather than replacing it with the basic template.
+  if (result.generatedBy === "fallback" && (await getLessonPlan(reading.id))?.generatedBy === "gemini")
+    return Response.json({ error: "The AI couldn't be reached, so your current plan was kept. Try again in a minute." }, { status: 502 });
   const plan = { readingId: reading.id, text: result.text, generatedBy: result.generatedBy, createdAt: new Date().toISOString(), basedOnSessions: best.length };
   await saveLessonPlan(plan);
   return Response.json({ plan });

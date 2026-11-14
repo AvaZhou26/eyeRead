@@ -19,10 +19,28 @@ export function geminiConfigured(): boolean {
   return client() !== null;
 }
 
+/**
+ * Longest we wait for Gemini (ms). Finishing a reading session waits for its summary, so
+ * without a limit a slow or unreachable Gemini would leave the student stuck on "saving".
+ * After this the basic (non-AI) version is used instead, and can be retried from the report.
+ */
+const TIMEOUT_MS = Number(process.env.GEMINI_TIMEOUT_MS) || 25_000;
+
+function withTimeout<T>(work: Promise<T>, ms = TIMEOUT_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const limit = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Gemini took longer than ${Math.round(ms / 1000)} s`)), ms);
+  });
+  return Promise.race([work, limit]).finally(() => clearTimeout(timer));
+}
+
+/** What the student sees when Gemini fails. The technical error goes to the server log only. */
+export const AI_FAILED_NOTE = "The AI summary couldn't be created this time, so this is a basic version.";
+
 async function generateJson<T>(prompt: string, schema: object): Promise<T> {
   const ai = client();
   if (!ai) throw new Error("GEMINI_API_KEY is not set");
-  const res = await ai.models.generateContent({
+  const res = await withTimeout(ai.models.generateContent({
     model: MODEL,
     contents: prompt,
     config: {
@@ -30,7 +48,7 @@ async function generateJson<T>(prompt: string, schema: object): Promise<T> {
       responseJsonSchema: schema,
       temperature: 0.4,
     },
-  });
+  }));
   const text = res.text;
   if (!text) throw new Error("Gemini returned an empty response");
   return JSON.parse(text) as T;
@@ -137,7 +155,7 @@ ${fullText}`;
     return { generatedBy: "gemini", overview: out.overview, sections, quiz };
   } catch (err) {
     console.error("[gemini] session summary failed:", err);
-    return fallbackSessionAi(reading, groups, `Gemini request failed: ${(err as Error).message}`);
+    return { ...fallbackSessionAi(reading, groups, AI_FAILED_NOTE), failed: true };
   }
 }
 
@@ -181,7 +199,8 @@ export async function generateClassDigest(
   const hardest = [...body].sort((a, b) => b.avgRereads - a.avgRereads).slice(0, 3);
   const mostSkipped = [...body].sort((a, b) => b.skippedPct - a.skippedPct).slice(0, 3);
 
-  if (!geminiConfigured()) {
+  // The version without AI: used when there's no key, and when Gemini doesn't answer.
+  const basic = (lastLine: string): { text: string; generatedBy: "fallback" } => {
     const lines = [
       `${studentCount} student${studentCount === 1 ? " has" : "s have"} read this so far.`,
       mostSkipped[0] && mostSkipped[0].skippedPct > 0
@@ -190,10 +209,11 @@ export async function generateClassDigest(
       hardest[0] && hardest[0].avgRereads > 0
         ? `Most re-read: paragraph ${hardest[0].index + 1} (${hardest[0].avgRereads.toFixed(1)} re-reads per student), which may be a confusing passage.`
         : "Re-reading was low across the text.",
-      "Add a GEMINI_API_KEY for a written analysis.",
+      lastLine,
     ];
     return { text: lines.join(" "), generatedBy: "fallback" };
-  }
+  };
+  if (!geminiConfigured()) return basic("Add a GEMINI_API_KEY for a written analysis.");
 
   const table = aggregates
     .map(
@@ -223,7 +243,7 @@ Refer to paragraphs as "¶N".`;
     return { text: out.digest, generatedBy: "gemini" };
   } catch (err) {
     console.error("[gemini] class digest failed:", err);
-    return { text: `Couldn't reach Gemini (${(err as Error).message}).`, generatedBy: "fallback" };
+    return basic("The AI version couldn't be created this time, so this is the basic one. Generate again to retry.");
   }
 }
 
@@ -269,7 +289,8 @@ export async function generateLessonPlan(
   const skipped = [...body].filter((a) => a.skippedPct + a.skimmedPct / 2 >= 25).sort((a, b) => b.skippedPct - a.skippedPct).slice(0, 3);
   const quote = (a: ClassParagraphAggregate) => `"${a.text.slice(0, 140).trim()}${a.text.length > 140 ? "…" : ""}"`;
 
-  if (!geminiConfigured()) {
+  // The template plan without AI: used when there's no key, and when Gemini doesn't answer.
+  const basicPlan = (lastLine: string): { text: string; generatedBy: "fallback" } => {
     const out: string[] = [];
     out.push(`Lesson plan: ${reading.title}`);
     out.push(
@@ -295,9 +316,10 @@ export async function generateLessonPlan(
     out.push("4. Discussion and exit ticket (10 min)");
     out.push("Pose one question that connects the hard passage to the skipped one. Close with a one-line exit ticket: \"What is still unclear?\"");
     out.push("");
-    out.push("Add a GEMINI_API_KEY for a written plan with discussion questions tailored to the text.");
+    out.push(lastLine);
     return { text: out.join("\n"), generatedBy: "fallback" };
-  }
+  };
+  if (!geminiConfigured()) return basicPlan("Add a GEMINI_API_KEY for a written plan with discussion questions tailored to the text.");
 
   const table = aggregates
     .map(
@@ -323,7 +345,7 @@ Refer to paragraphs as "¶N". Keep it under 350 words.`;
     return { text: out.plan, generatedBy: "gemini" };
   } catch (err) {
     console.error("[gemini] lesson plan failed:", err);
-    return { text: `Couldn't reach Gemini (${(err as Error).message}).`, generatedBy: "fallback" };
+    return basicPlan("The AI version couldn't be created this time, so this is the basic one. Generate again to retry.");
   }
 }
 
@@ -333,7 +355,7 @@ Refer to paragraphs as "¶N". Keep it under 350 words.`;
 export async function transcribePages(files: { mimeType: string; data: Buffer }[]): Promise<string | null> {
   const ai = client();
   if (!ai) return null;
-  const res = await ai.models.generateContent({
+  const res = await withTimeout(ai.models.generateContent({
     model: MODEL,
     contents: [
       {
@@ -349,6 +371,6 @@ Leave out page numbers, running headers/footers, and handwriting in the margins.
       },
     ],
     config: { temperature: 0 },
-  });
+  }), 60_000); // several page images take longer to read than a summary takes to write
   return res.text?.trim() || null;
 }

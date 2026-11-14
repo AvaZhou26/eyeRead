@@ -200,4 +200,5 @@ Simulation check: `npm run simulate` feeds a fake reader with noisy, offset gaze
 | `scripts/simulate-reread.ts` | Benchmark for downward drift and re-reading detection |
 | `src/lib/gaze/devLog.ts`, `src/app/api/dev/gaze-log/` | Development only: logs real sessions' gaze-tracking internals to `data/gaze-debug.jsonl` |
 | `scripts/replay-gaze-log.ts` | Replays a logged real session through the tracker and scores it |
+| `scripts/simulate-behaviors.ts` | Simulation: does the report tell reading, skimming, re-reading, skipping and looking away apart? (`npm run simulate:behaviors`) |
 | `PLAN.md` | Original research and feasibility plan |

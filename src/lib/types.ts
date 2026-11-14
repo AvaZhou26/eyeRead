@@ -114,6 +114,8 @@ export interface AiResult {
   sections: SkippedSection[];
   quiz: QuizQuestion[];
   note?: string;
+  /** True when Gemini was asked and didn't answer (as opposed to no key): worth trying again. */
+  failed?: boolean;
 }
 
 /**
