@@ -184,7 +184,7 @@ export class LineHmm {
     const resid = obs.y - (this.seenY((L.top + L.bottom) / 2) - this.biasY);
     const alpha = Math.min(1, dt / BIAS_TAU);
     this.biasY += alpha * (resid - this.biasY);
-    const cap = Math.max(lineHeight * 3, this.sigmaY * 1.5);
+    const cap = this.biasCap ?? Math.max(lineHeight * 3, this.sigmaY * 1.5);
     this.biasY = Math.max(-cap, Math.min(cap, this.biasY));
   }
 

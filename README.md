@@ -87,12 +87,13 @@ To stop the app, click the terminal and press **Ctrl + C**.
    - New accounts start with no courses: click **Join a course** and type **READ01** (the demo course's join code).
 2. Under **Assigned readings**, click **How Your Eyes Actually Read**, then **Start reading**.
 3. Click **Turn on camera** and allow camera access when Chrome asks.
-4. Wait until all four checks are green (face visible, centered, distance, lighting). If lighting is red, face a lamp or window; don't sit with a window behind you.
+4. Wait until all five checks are green (face visible, centered, distance, lighting, glare). If lighting is red, face a lamp or window; don't sit with a window behind you. If you wear glasses and glare is yellow, move the lamp to the side or tilt the screen until it turns green. Sitting closer also makes tracking sharper.
 5. Click **Calibrate & start**. The app goes full screen.
    - **Look at each dot, then click it** (13 dots). Keep your head roughly still.
    - Then **just look** at 5 more dots (no clicking).
    - You'll get a rating (Great / Okay / Rough). Move your eyes around: a circle should roughly follow your gaze. If it's "Rough", click **Recalibrate**.
-6. Click **Start reading** and read normally. Use **→** / **Space** for the next page and **←** to go back.
+6. Click **Start reading**. One more short step follows: **read a one-page passage (about 45 seconds) once at your normal pace**, then press **Space**. This lines the tracker up with how your eyes move down real text and measures your own reading speed, so "read" vs "skimmed" is judged against *your* pace (shown on the report as "your usual N"). You can skip it; the last pace measured on this browser is used instead.
+7. Click **Start reading** again and read normally. Use **→** / **Space** for the next page and **←** to go back.
 
 ### Things to try while reading
 
@@ -105,8 +106,8 @@ To stop the app, click the terminal and press **Ctrl + C**.
 | Switch to another browser tab and come back | Counted as a distraction in your report. |
 | Gear icon (top right) | Change theme (light / dark / sepia), font, text size, turn reading aids off, or recalibrate. |
 
-7. Need a break? Click **Pause** (top right). Your place and everything measured so far are saved. Back on the reading's page, **Continue reading** picks up on the same page, and the sittings add up to ONE report. (**Start over instead** begins a fresh session.)
-8. Click **Finish & see report** on the last page, or **Finish session** at the top. After a few seconds you'll see:
+8. Need a break? Click **Pause** (top right). Your place and everything measured so far are saved. Back on the reading's page, **Continue reading** picks up on the same page, and the sittings add up to ONE report. (**Start over instead** begins a fresh session.)
+9. Click **Finish & see report** on the last page, or **Finish session** at the top. After a few seconds you'll see:
    - coverage, focus, reading speed and time
    - a paragraph-by-paragraph strip, and the full text colored by read / skimmed / skipped, with re-read paragraphs marked
    - **What you missed**: Gemini summaries of the skipped parts, plus a 3-question quiz on them

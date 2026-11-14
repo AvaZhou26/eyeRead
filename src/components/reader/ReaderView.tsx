@@ -7,6 +7,8 @@ import { isHeading, splitWords } from "@/lib/text";
 import type { FaceTracker } from "@/lib/gaze/faceTracker";
 import type { WebEyeTrackSource } from "@/lib/gaze/webEyeTrackSource";
 import type { LineBox } from "@/lib/gaze/lineHmm";
+import { sigmaYFor } from "@/lib/gaze/gazeModel";
+import { loadPace, type AxisMap } from "@/lib/gaze/readingCalibration";
 import { OneEuroFilter } from "@/lib/gaze/oneEuro";
 import { ReadingTracker, type MarkerInfo, type ToastInfo, type TrackingMode } from "@/lib/gaze/readingTracker";
 import type { ReadingState, ResumeState, SessionReport } from "@/lib/types";
@@ -39,8 +41,27 @@ export function loadPrefs(): ReaderPrefs {
   }
 }
 
+/** Debug label for one axis of the reading-calibration correction. */
+function axisLabel(axis: string, m: AxisMap) {
+  return `${axis} a ${m.a.toFixed(2)} b ${Math.round(m.b)}px${m.knots ? " bent" : ""}`;
+}
+
 export function lineHeightFor(prefs: ReaderPrefs) {
   return FONT_PX[prefs.size] * LINE_HEIGHT;
+}
+
+/**
+ * Where the reader puts its text column for a viewport, so other screens (the reading
+ * calibration) can lay text out in exactly the same place, size and spacing.
+ */
+export function readerGeometry(vw: number, vh: number, prefs: Pick<ReaderPrefs, "size">) {
+  const fontPx = FONT_PX[prefs.size];
+  const lineH = fontPx * LINE_HEIGHT;
+  const pageW = Math.max(280, Math.min(660, vw - 2 * 110));
+  const pageLeft = Math.round((vw - pageW) / 2);
+  const pageTop = TOP_BAR + 28;
+  const pageH = Math.max(lineH * 4, Math.floor((vh - TOP_BAR - BOTTOM_BAR - 48) / lineH) * lineH);
+  return { fontPx, lineH, pageW, pageLeft, pageTop, pageH, lineHeightRatio: LINE_HEIGHT };
 }
 
 interface Layout {
@@ -117,12 +138,7 @@ export function ReaderView({
   }, [paragraphs]);
 
   // ----- geometry -----
-  const fontPx = FONT_PX[prefs.size];
-  const lineH = fontPx * LINE_HEIGHT;
-  const pageW = Math.max(280, Math.min(660, vp.w - 2 * 110));
-  const pageLeft = Math.round((vp.w - pageW) / 2);
-  const pageTop = TOP_BAR + 28;
-  const pageH = Math.max(lineH * 4, Math.floor((vp.h - TOP_BAR - BOTTOM_BAR - 48) / lineH) * lineH);
+  const { fontPx, lineH, pageW, pageLeft, pageTop, pageH } = readerGeometry(vp.w, vp.h, prefs);
   const stride = pageW + COL_GAP;
 
   useEffect(() => {
@@ -218,7 +234,7 @@ export function ReaderView({
   useEffect(() => {
     if (!layout || trackerRef.current) return;
     const v = calibration?.validation;
-    const sigmaY = v ? Math.min(lineH * 5, Math.max(lineH * 0.7, v.meanAbsDyPx * 1.3)) : lineH * 2;
+    const sigmaY = v ? sigmaYFor(v, lineH) : lineH * 2;
     const rt = new ReadingTracker(
       {
         mode,
@@ -229,6 +245,9 @@ export function ReaderView({
         sigmaY,
         initialBiasY: 0,
         aids: prefs.aids,
+        // Own pace from this session's reading calibration, else the last one measured here.
+        secPerWord: calibration?.secPerWord ?? loadPace()?.secPerWord,
+        alignedByReading: !!calibration?.readingFit?.ok,
       },
       performance.now() / 1000,
     );
@@ -239,7 +258,10 @@ export function ReaderView({
       if (!showGazeRef.current) return;
       if (gazeDotRef.current && d.gaze) {
         gazeDotRef.current.style.opacity = "1";
-        gazeDotRef.current.style.transform = `translate(${d.gaze.x - 9}px, ${d.gaze.y - 9}px)`;
+        // Draw the gaze the way the line model sees it: minus the vertical offset it has learned
+        // while you read (the "bias" below). Otherwise the dot sits a constant distance above or
+        // below the highlighted line even when the tracker has the right line.
+        gazeDotRef.current.style.transform = `translate(${d.gaze.x - 9}px, ${d.gaze.y - d.biasY - 9}px)`;
       }
       if (lineHiRef.current) {
         if (d.line) {
@@ -650,7 +672,7 @@ export function ReaderView({
           onDone={(r) => {
             setCalibration(r);
             setMode("gaze");
-            const sigmaY = Math.min(lineH * 5, Math.max(lineH * 0.7, r.validation.meanAbsDyPx * 1.3));
+            const sigmaY = sigmaYFor(r.validation, lineH);
             trackerRef.current?.retune(sigmaY, 0, "gaze");
             setRecalibrating(false);
           }}

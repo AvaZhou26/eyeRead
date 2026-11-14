@@ -47,7 +47,7 @@ teacher and an **Incognito window** (⌘ + Shift + N) for the student. Each wind
 ## 3. Read with eye tracking (MediaPipe + ridge is the default again)
 
 1. As the student, click a reading → **Start reading** → **Turn on camera** → allow the camera.
-2. Wait for all four checks to turn green: face, centered, distance, lighting. Face a lamp, not a window.
+2. Wait for all five checks to turn green: face, centered, distance, lighting, glare. Face a lamp, not a window. Only "face" and "too dark" block calibration; the others are warnings.
 3. **Calibrate & start**: look at each dot and click it (13 dots), then just look at 5 more.
    - ✅ You get a rating: Great, Okay or Rough. If it's Rough, click **Recalibrate**.
 4. Read normally. Use **→** for the next page.

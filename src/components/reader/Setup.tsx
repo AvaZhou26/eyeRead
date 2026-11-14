@@ -6,6 +6,17 @@ import type { FaceFrame, FaceTracker } from "@/lib/gaze/faceTracker";
 import { IconArrowLeft, IconCamera, IconCheck } from "@/components/icons";
 
 type Check = "ok" | "warn" | "bad" | "wait";
+
+// Thresholds for the pre-calibration checks. First guesses: tune them against real sessions.
+/** Eye width (corner to corner) in camera pixels below which tracking gets coarse. At 720p on
+ *  a laptop camera this is roughly 55–60 cm away. Closer = more iris pixels per line of text. */
+const EYE_PX_MIN = 40;
+/** Face too close: eye-corner distance above this share of the image width. */
+const FACE_SIZE_MAX = 0.26;
+/** Share of near-white pixels around the eyes above which glare likely hides the iris. */
+const GLARE_MAX = 0.04;
+/** Average brightness around the eyes below which the face is in shadow (e.g. backlit). */
+const EYE_LUMA_MIN = 70;
 export type CameraState = "off" | "loading" | "on" | "denied" | "missing" | "busy" | "error";
 
 const CAMERA_PROBLEM: Partial<Record<CameraState, { title: string; body: string }>> = {
@@ -44,12 +55,22 @@ export function Setup({
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const latest = useRef<FaceFrame | null>(null);
-  const [checks, setChecks] = useState<{ face: Check; distance: Check; light: Check; center: Check; distanceText: string }>({
+  const [checks, setChecks] = useState<{
+    face: Check;
+    distance: Check;
+    light: Check;
+    center: Check;
+    glare: Check;
+    distanceText: string;
+    lightText: string;
+  }>({
     face: "wait",
     distance: "wait",
     light: "wait",
     center: "wait",
+    glare: "wait",
     distanceText: "Distance",
+    lightText: "Lighting",
   });
 
   useEffect(() => tracker.subscribe((f) => (latest.current = f)), [tracker]);
@@ -83,17 +104,39 @@ export function Setup({
       if (!f) return;
       const recent = performance.now() / 1000 - f.t < 0.5;
       const face: Check = recent && f.face ? "ok" : "bad";
-      const distance: Check = !f.face ? "wait" : f.faceSize < 0.075 ? "warn" : f.faceSize > 0.26 ? "warn" : "ok";
-      const light: Check = f.brightness === null ? "wait" : f.brightness < 55 ? "bad" : f.brightness < 85 ? "warn" : "ok";
+      // Distance: judged by how many pixels the camera has on your eyes (works for any camera).
+      const tooFar = f.face && f.eyePx < EYE_PX_MIN;
+      const tooClose = f.face && f.faceSize > FACE_SIZE_MAX;
+      const distance: Check = !f.face ? "wait" : tooFar || tooClose ? "warn" : "ok";
+      const distanceText = !f.face
+        ? "Distance"
+        : tooFar
+          ? "Move closer: tracking is sharper when your eyes are bigger to the camera"
+          : tooClose
+            ? "Move back a little"
+            : "Distance looks good";
+      // Lighting: the whole image (room) must not be too dark; the face itself should be lit.
+      const shadowed = f.eyes !== null && f.eyes.luma < EYE_LUMA_MIN;
+      const light: Check = f.brightness === null ? "wait" : f.brightness < 55 ? "bad" : f.brightness < 85 || shadowed ? "warn" : "ok";
+      const lightText =
+        light === "bad"
+          ? "Too dark: add light in front of you"
+          : shadowed
+            ? "Your face is in shadow: face a light, not a window behind you"
+            : light === "warn"
+              ? "A bit dim"
+              : "Lighting";
+      // Glare: bright reflections over the eyes (usually on glasses) hide the iris.
+      const glare: Check = !f.face || !f.eyes ? "wait" : f.eyes.glare > GLARE_MAX ? "warn" : "ok";
       const center: Check = !f.face ? "wait" : Math.abs(f.faceX - 0.5) > 0.2 || Math.abs(f.faceY - 0.5) > 0.22 ? "warn" : "ok";
-      const distanceText = !f.face ? "Distance" : f.faceSize < 0.075 ? "Move a bit closer" : f.faceSize > 0.26 ? "Move back a little" : "Distance looks good";
-      setChecks({ face, distance, light, center, distanceText });
+      setChecks({ face, distance, light, center, glare, distanceText, lightText });
     }, 250);
     return () => clearInterval(id);
   }, [cameraState]);
 
-  const distanceText = checks.distanceText;
-  const lightText = checks.light === "bad" ? "Too dark: add light in front of you" : checks.light === "warn" ? "A bit dim" : "Lighting";
+  const { distanceText, lightText } = checks;
+  const glareText =
+    checks.glare === "warn" ? "Glare on your eyes or glasses: move the light to the side or tilt the screen" : "No glare on your eyes";
   const ready = checks.face === "ok" && checks.light !== "bad";
 
   return (
@@ -162,6 +205,7 @@ export function Setup({
               <CheckRow state={cameraState === "on" ? checks.center : "wait"} text={checks.center === "warn" ? "Center your face in the oval" : "Centered"} />
               <CheckRow state={cameraState === "on" ? checks.distance : "wait"} text={distanceText} />
               <CheckRow state={cameraState === "on" ? checks.light : "wait"} text={lightText} />
+              <CheckRow state={cameraState === "on" ? checks.glare : "wait"} text={glareText} />
             </ul>
             <button className="btn btn-primary w-full !py-2.5" disabled={cameraState !== "on" || !ready} onClick={onCalibrate}>
               Calibrate &amp; start

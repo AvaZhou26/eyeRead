@@ -52,7 +52,11 @@ export default async function ReportPage({ params }: PageProps<"/reports/[id]">)
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
         <Stat label="Coverage" value={`${Math.round(r.coveragePct)}%`} hint={`${r.wordsRead.toLocaleString()} of ${reading.wordCount.toLocaleString()} words`} color={coverColor} />
         <Stat label="Focus" value={`${Math.round(r.focusPct)}%`} hint={`${r.distractions.length} distraction${r.distractions.length === 1 ? "" : "s"}`} />
-        <Stat label="Reading speed" value={r.avgWpm ? `${r.avgWpm}` : "–"} hint={r.avgWpm ? "words / minute" : "not enough data"} />
+        <Stat
+          label="Reading speed"
+          value={r.avgWpm ? `${r.avgWpm}` : "–"}
+          hint={r.avgWpm ? `words / minute${r.baselineWpm ? ` · your usual ${r.baselineWpm}` : ""}` : "not enough data"}
+        />
         <Stat label="Time" value={formatDuration(r.durationSec)} hint={`${formatDuration(r.activeSec)} focused`} />
       </div>
 

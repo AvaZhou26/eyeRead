@@ -168,7 +168,7 @@ export function GazeLab() {
   const [collecting, setCollecting] = useState(false);
   const [lineH, setLineH] = useState(40);
   const [steps, setSteps] = useState(1); // WebEyeTrack's own default
-  const [fps, setFps] = useState({ cam: 0, wet: 0 });
+  const [fps, setFps] = useState<{ cam: number; wet: number; timing: WebEyeTrackSource["timing"] }>({ cam: 0, wet: 0, timing: null });
   const [results, setResults] = useState<{ rounds: Metric[][]; overall: Metric[]; meta: Record<string, unknown> } | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -181,7 +181,10 @@ export function GazeLab() {
     (async () => {
       try {
         const [wet] = await Promise.all([WebEyeTrackSource.create({ withRaw: true }), tracker.init()]);
-        if (cancelled) return;
+        if (cancelled) {
+          wet.dispose(); // stop its worker
+          return;
+        }
         wetRef.current = wet;
         const fake = new URLSearchParams(window.location.search).get("fakeImage");
         if (fake) installFakeCamera(fake); // pipeline smoke test without a webcam
@@ -217,12 +220,14 @@ export function GazeLab() {
         setPhase("error");
       }
     })();
-    const id = setInterval(() => setFps({ cam: tracker.fps, wet: wetRef.current?.fps ?? 0 }), 500);
+    const id = setInterval(() => setFps({ cam: tracker.fps, wet: wetRef.current?.fps ?? 0, timing: wetRef.current?.timing ?? null }), 500);
     return () => {
       cancelled = true;
       clearInterval(id);
       unsub();
       tracker.stop();
+      wetRef.current?.dispose();
+      wetRef.current = null;
     };
   }, []);
 
@@ -327,6 +332,13 @@ export function GazeLab() {
       <video ref={videoRef} className="fixed bottom-3 right-3 w-40 rounded opacity-60 -scale-x-100 pointer-events-none" muted playsInline />
       <div className="fixed bottom-3 left-3 text-xs text-muted font-mono pointer-events-none">
         cam {fps.cam.toFixed(0)} fps · WebEyeTrack {fps.wet.toFixed(0)} fps
+        {fps.timing && (
+          <>
+            {" "}
+            · worker [{fps.timing.backend}] pixels {fps.timing.pixels.toFixed(0)} · prepare {fps.timing.prepare.toFixed(0)} · model{" "}
+            {fps.timing.model.toFixed(0)} · total {fps.timing.total.toFixed(0)} ms
+          </>
+        )}
       </div>
 
       {METHODS.map(({ key, color }) => (

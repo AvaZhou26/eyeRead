@@ -82,6 +82,8 @@ export interface SessionReport {
   coveragePct: number; // share of words read (skimmed counts half)
   wordsRead: number;
   avgWpm: number | null;
+  /** The student's own normal pace from the reading calibration (what read/skim was judged against). */
+  baselineWpm?: number | null;
   calibrationQuality: "good" | "fair" | "poor" | "attention-only";
   calibrationErrorPx: number | null;
   paragraphs: ParagraphStat[];

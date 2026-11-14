@@ -44,10 +44,11 @@ function run(name: string, script: Step[], noise: number, biasY: number) {
   const lineSec = WORDS_PER_LINE / (WPM / 60);
   const drift = (tt: number) => biasY + tt * 0.6; // slow calibration drift (px/s)
 
+  const FACE_EYE_PX = 60; // not used by the tracker; only Setup reads it
   for (const step of script) {
     if (step.kind === "away") {
       for (let k = 0; k < step.sec * FPS; k++, t += 1 / FPS) {
-        const f: FaceFrame = { t, face: false, blink: false, features: null, yaw: 0, pitch: 0, faceSize: 0, faceX: 0.5, faceY: 0.5, brightness: 120 };
+        const f: FaceFrame = { t, face: false, blink: false, features: null, yaw: 0, pitch: 0, faceSize: 0, faceX: 0.5, faceY: 0.5, brightness: 120, eyePx: FACE_EYE_PX, eyes: null };
         rt.onFrame(f, null, null, t);
       }
       continue;
@@ -62,7 +63,7 @@ function run(name: string, script: Step[], noise: number, biasY: number) {
       const gaze = { x: fx.filter(gx, t), y: fy.filter(gy, t) };
       const fast = { x: qx.filter(gx, t), y: qy.filter(gy, t) };
       const blink = Math.random() < 0.03;
-      const f: FaceFrame = { t, face: true, blink, features: blink ? null : [0], yaw: 0, pitch: 0, faceSize: 0.12, faceX: 0.5, faceY: 0.5, brightness: 120 };
+      const f: FaceFrame = { t, face: true, blink, features: blink ? null : [0], yaw: 0, pitch: 0, faceSize: 0.12, faceX: 0.5, faceY: 0.5, brightness: 120, eyePx: FACE_EYE_PX, eyes: null };
       let best = -1;
       let raw = -1;
       rt.onDebug = (d) => {
