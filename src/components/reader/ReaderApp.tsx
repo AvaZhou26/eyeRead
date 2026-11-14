@@ -130,7 +130,7 @@ export function ReaderApp({
     }
   }
 
-  const lineH = prefs ? lineHeightFor(prefs) : 40;
+  const lineH = prefs ? lineHeightFor(prefs) : 50;
 
   return (
     <>

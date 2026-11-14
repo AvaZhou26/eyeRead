@@ -38,14 +38,13 @@ export class LineHmm {
   p: Float64Array = new Float64Array(1);
   biasY = 0;
   /**
-   * Limits on the drift correction. Defaults (null / BIAS_TAU) suit a dot-only calibration,
-   * where this offset is the main fix for a misaligned calibration. After the reading
-   * calibration the offset is already right, so the reader tightens these: a free offset can
-   * lock onto a wrong line (it's learned against the line it currently believes, which it
-   * picked using that same offset), and a big one makes things worse, not better.
+   * Vertical stretch of the gaze relative to the page (1 = none). A webcam calibration is
+   * often right near the top of the page but squashed or stretched further down; a single
+   * offset (biasY) can't fix that. Measured across the first line, which is where biasY is
+   * learned: seen y = gainRef + gain × (true y − gainRef) + biasY.
    */
-  biasCap: number | null = null;
-  biasTau = BIAS_TAU;
+  gain = 1;
+  private gainRef = 0;
 
   constructor(
     public sigmaY: number,
@@ -60,6 +59,7 @@ export class LineHmm {
       this.p[0] = 1;
       return;
     }
+    this.gainRef = (lines[0].top + lines[0].bottom) / 2;
     if (start === "top") {
       // A new page: you most likely start at the first line.
       for (let i = 0; i < n; i++) this.p[i] = Math.exp(-i / 1.5);
@@ -78,6 +78,16 @@ export class LineHmm {
       return;
     }
     for (let i = 0; i < this.p.length; i++) this.p[i] /= s;
+  }
+
+  /** Where the camera's gaze should land (raw y) when the reader looks at page height `y`. */
+  private seenY(y: number): number {
+    return this.gainRef + this.gain * (y - this.gainRef) + this.biasY;
+  }
+
+  /** Turn a raw gaze y into a page y, undoing the learned offset and stretch. */
+  correctY(rawY: number): number {
+    return this.gainRef + (rawY - this.biasY - this.gainRef) / this.gain;
   }
 
   /** Advance time by dt seconds. `sweep` = a return sweep was just detected. */
@@ -142,13 +152,12 @@ export class LineHmm {
       return;
     }
     if (!obs) return;
-    const y = obs.y - this.biasY;
     const colLeft = this.lines[0].left;
     const colRight = Math.max(...this.lines.map((l) => l.right));
     for (let i = 0; i < n; i++) {
       const L = this.lines[i];
       const cy = (L.top + L.bottom) / 2;
-      const z = (y - cy) / this.sigmaY;
+      const z = (obs.y - this.seenY(cy)) / this.sigmaY;
       // Horizontal fit: gaze far right of a SHORT line (e.g. a paragraph's last line)
       // makes that line less likely. This gives the model landmarks to lock onto.
       const right = Math.max(L.right, colLeft + (colRight - colLeft) * 0.15);
@@ -172,8 +181,8 @@ export class LineHmm {
     const b = this.best();
     if (b.index < 0 || b.prob < BIAS_MIN_PROB) return;
     const L = this.lines[b.index];
-    const resid = obs.y - (L.top + L.bottom) / 2;
-    const alpha = Math.min(1, dt / this.biasTau);
+    const resid = obs.y - (this.seenY((L.top + L.bottom) / 2) - this.biasY);
+    const alpha = Math.min(1, dt / BIAS_TAU);
     this.biasY += alpha * (resid - this.biasY);
     const cap = this.biasCap ?? Math.max(lineHeight * 3, this.sigmaY * 1.5);
     this.biasY = Math.max(-cap, Math.min(cap, this.biasY));

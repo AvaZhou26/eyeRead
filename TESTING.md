@@ -44,7 +44,7 @@ teacher and an **Incognito window** (⌘ + Shift + N) for the student. Each wind
    - ✅ The teacher's readings show under **Assigned readings**, with due dates.
    - ✅ Stats appear at the top: readings done, time reading, coverage, speed.
 
-## 3. Read with eye tracking (WebEyeTrack is now the default)
+## 3. Read with eye tracking (MediaPipe + ridge is the default again)
 
 1. As the student, click a reading → **Start reading** → **Turn on camera** → allow the camera.
 2. Wait for all five checks to turn green: face, centered, distance, lighting, glare. Face a lamp, not a window. Only "face" and "too dark" block calibration; the others are warnings.
@@ -53,7 +53,8 @@ teacher and an **Incognito window** (⌘ + Shift + N) for the student. Each wind
 4. Read normally. Use **→** for the next page.
 5. Press **G** to show the debug dot (where it thinks you look) and the highlighted line. Press **G** again to hide them.
    - ✅ The highlighted line should mostly follow the line you're reading, within a line or so.
-6. **Compare with the old tracker:** open the same reading with `?gaze=mediapipe` added to the reader URL, e.g. `http://localhost:3000/read/<id>?gaze=mediapipe`, and calibrate again. Note which one follows your lines better.
+   - The debug line also shows **stretch**. It starts at 1.00 and may change after you finish a page with the **→** key: the tracker is correcting itself. Turn pages with the keyboard, not the mouse, so it can learn.
+6. **Compare with WebEyeTrack:** open the same reading with `?gaze=webeyetrack` added to the reader URL, e.g. `http://localhost:3000/read/<id>?gaze=webeyetrack`, and calibrate again. Note which one follows your lines better.
    - This is the one thing I couldn't test myself (my browser has no camera), so please tell me how both feel.
 
 ## 4. Pause and resume (one report)

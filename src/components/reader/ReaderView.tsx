@@ -24,8 +24,10 @@ export interface ReaderPrefs {
 }
 const DEFAULT_PREFS: ReaderPrefs = { font: "serif", size: "m", aids: true, showGaze: false };
 const FONT_PX = { s: 18, m: 20, l: 23 };
-export const FONT_VAR = { serif: "var(--font-reader-serif)", sans: "var(--font-ui)", hyper: "var(--font-reader-hyper)" };
-const LINE_HEIGHT = 2.0; // generous spacing = lines farther apart = easier to tell apart by gaze
+const FONT_VAR = { serif: "var(--font-reader-serif)", sans: "var(--font-ui)", hyper: "var(--font-reader-hyper)" };
+// Generous spacing = lines farther apart = easier to tell apart by gaze. A webcam is only
+// accurate to about a centimetre on screen, so every extra pixel between lines helps.
+const LINE_HEIGHT = 2.5;
 const COL_GAP = 120;
 const TOP_BAR = 56;
 const BOTTOM_BAR = 60;
@@ -272,9 +274,7 @@ export function ReaderView({
       if (debugRef.current) {
         debugRef.current.textContent =
           `state ${d.state} · line ${d.line ? d.line.index : "-"} (${Math.round(d.lineProb * 100)}%) · off ${Math.round(d.offProb * 100)}%` +
-          ` · bias ${Math.round(d.biasY)}px · sweeps/20s ${d.sweeps} · ${Math.round(d.fps)} fps${d.face ? "" : " · no face"}` +
-          // Reading-calibration correction (corrected y = a·y + b): with "bias", tells where an offset comes from.
-          (calibRef.current?.readingFit ? ` · readfit ${axisLabel("y", calibRef.current.readingFit)} ${calibRef.current.readingFit.x ? axisLabel("x", calibRef.current.readingFit.x) : "x –"}` : " · no readfit");
+          ` · bias ${Math.round(d.biasY)}px · stretch ${d.gain.toFixed(2)} · sweeps/20s ${d.sweeps} · ${Math.round(d.fps)} fps${d.face ? "" : " · no face"}`;
       }
     };
     if (resume) rt.restore(resume, performance.now() / 1000);
@@ -323,7 +323,7 @@ export function ReaderView({
 
   // ----- paging -----
   const goTo = useCallback(
-    (p: number) => {
+    (p: number, byKeyboard = false) => {
       if (!layout) return;
       const np = Math.max(0, Math.min(layout.pages - 1, p));
       if (np === pageRef.current) return;
@@ -331,7 +331,9 @@ export function ReaderView({
       setPage(np);
       firstWordOfPage.current = layout.byPage[np]?.[0]?.firstWord ?? 0;
       if (innerRef.current) innerRef.current.style.transform = `translateX(${-np * stride}px)`;
-      trackerRef.current?.setPage(layout.byPage[np] ?? [], np, performance.now() / 1000, "turn");
+      // Turning with the keyboard means the eyes were still on the last line, which the
+      // tracker uses to keep itself calibrated (a mouse click pulls the eyes to the button).
+      trackerRef.current?.setPage(layout.byPage[np] ?? [], np, performance.now() / 1000, "turn", byKeyboard);
       setMarker(null);
     },
     [layout, stride],
@@ -349,10 +351,10 @@ export function ReaderView({
       if ((e.target as HTMLElement)?.tagName === "INPUT") return;
       if (["ArrowRight", "PageDown", " "].includes(e.key)) {
         e.preventDefault();
-        goTo(pageRef.current + 1);
+        goTo(pageRef.current + 1, true);
       } else if (["ArrowLeft", "PageUp"].includes(e.key)) {
         e.preventDefault();
-        goTo(pageRef.current - 1);
+        goTo(pageRef.current - 1, true);
       } else if (e.key.toLowerCase() === "g" && modeRef.current === "gaze") {
         setPrefs((p) => ({ ...p, showGaze: !p.showGaze }));
       }
