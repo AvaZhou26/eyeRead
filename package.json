@@ -9,6 +9,9 @@
     "lint": "eslint",
     "postinstall": "node scripts/setup-vision.mjs",
     "simulate": "npx --yes tsx scripts/simulate.ts",
+    "simulate:pages": "npx --yes tsx scripts/simulate-pages.ts",
+    "simulate:behaviors": "npx --yes tsx scripts/simulate-behaviors.ts",
+    "replay": "npx --yes tsx scripts/replay.ts",
     "prebuild": "node scripts/setup-vision.mjs"
   },
   "dependencies": {

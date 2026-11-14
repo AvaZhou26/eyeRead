@@ -5,14 +5,23 @@
 //
 // Run with:  npx tsx scripts/simulate-pages.ts
 // Options (env): LINE_H=40 (line height in px), RUNS=30, NOISE=80
+//   BLINKS=burst|iid  how blinks are simulated. "burst" (default) is closer to real eyes: a
+//                     blink hides the eyes for about 0.2 s, comes every few seconds, and
+//                     often lands right on the jump from the end of one line to the next.
+//                     "iid" is the older model: each frame is lost with a 3% chance.
+//   RECORD=file.json  also save one simulated session (gain 0.85) as a recording, to try
+//                     out scripts/replay.ts without a webcam
 import { ReadingTracker } from "../src/lib/gaze/readingTracker";
 import { OneEuroFilter } from "../src/lib/gaze/oneEuro";
 import type { LineBox } from "../src/lib/gaze/lineHmm";
 import type { FaceFrame } from "../src/lib/gaze/faceTracker";
+import { GazeRecorder } from "../src/lib/gaze/recorder";
+import { writeFileSync } from "node:fs";
 
 const LINE_H = Number(process.env.LINE_H) || 50;
 const RUNS = Number(process.env.RUNS) || 30;
 const NOISE = Number(process.env.NOISE) || 80;
+const BLINKS = process.env.BLINKS === "iid" ? "iid" : "burst";
 const PAGE_PX = 600; // usable page height; taller lines mean fewer lines per page
 const LEFT = 300, WIDTH = 620, TOP = 100, WORDS_PER_LINE = 11, PAGES = 5;
 const N_LINES = Math.floor(PAGE_PX / LINE_H);
@@ -41,9 +50,10 @@ interface Result {
   near: number; // ... within one line
   bottomExact: number; // same, for the bottom third of each page (where a gain error bites)
   read: number; // share of lines that ended up counted as "read" (all were truly read)
+  sweeps: number; // share of the real line-to-line jumps the tracker noticed
 }
 
-function runOnce(gain: number, biasY: number): Result {
+function runOnce(gain: number, biasY: number, recorder?: GazeRecorder): Result {
   const total = PAGES * N_LINES * WORDS_PER_LINE;
   const wordParagraph = new Int32Array(total).map((_, w) => Math.floor(w / WORDS_PER_LINE / 5));
   const nPara = Math.ceil((PAGES * N_LINES) / 5);
@@ -53,9 +63,11 @@ function runOnce(gain: number, biasY: number): Result {
       sigmaY: Math.max(LINE_H * 0.7, NOISE * 1.3), initialBiasY: 0, aids: true },
     0,
   );
+  if (recorder) rt.attachTap(recorder);
   const fx = new OneEuroFilter(0.6, 0.004), fy = new OneEuroFilter(0.6, 0.004);
   const qx = new OneEuroFilter(2.5, 0.01), qy = new OneEuroFilter(2.5, 0.01);
   let t = 0, frames = 0, exact = 0, near = 0, bFrames = 0, bExact = 0;
+  let blinkUntil = -1, nextBlink = 1 + Math.random() * 4;
   const lineSec = WORDS_PER_LINE / (WPM / 60);
   const firstCentre = TOP + LINE_H * 0.5;
   const allLines: LineBox[] = [];
@@ -67,13 +79,19 @@ function runOnce(gain: number, biasY: number): Result {
     for (let li = 0; li < lines.length; li++) {
       const L = lines[li];
       const n = Math.round(lineSec * FPS);
+      // People often blink as they jump to the next line.
+      if (BLINKS === "burst" && li > 0 && Math.random() < 0.3) blinkUntil = t + 0.1 + Math.random() * 0.15;
       for (let k = 0; k < n; k++, t += 1 / FPS) {
         const tx = L.left + (k / n) * (L.right - L.left);
         const ty = (L.top + L.bottom) / 2;
         // What the camera "sees": right at the first line, stretched/squashed below it.
         const seenY = firstCentre + gain * (ty - firstCentre) + biasY + t * 0.3;
         const gx = tx + gauss() * NOISE, gy = seenY + gauss() * NOISE;
-        const blink = Math.random() < 0.03;
+        if (BLINKS === "burst" && t >= nextBlink) {
+          blinkUntil = t + 0.15 + Math.random() * 0.15;
+          nextBlink = t + 2 + Math.random() * 5;
+        }
+        const blink = BLINKS === "iid" ? Math.random() < 0.03 : t < blinkUntil;
         const f: FaceFrame = { t, face: true, blink, features: blink ? null : [0], yaw: 0, pitch: 0, faceSize: 0.12, faceX: 0.5, faceY: 0.5, brightness: 120, eyePx: 30, eyes: null };
         let raw = -1;
         rt.onDebug = (d) => { raw = d.line ? d.line.index : -1; };
@@ -89,15 +107,23 @@ function runOnce(gain: number, biasY: number): Result {
     }
   }
   const r = rt.buildReport(t, Array.from({ length: nPara }, () => "x"), { quality: "good", errorPx: NOISE });
+  if (recorder) recorder.setMeta({ simulated: true, gain, noise: NOISE, coveragePct: r.coveragePct });
   const readLines = allLines.filter((l) => r.wordStatus[l.firstWord] === "read").length;
-  return { exact: exact / frames, near: near / frames, bottomExact: bExact / bFrames, read: readLines / allLines.length };
+  return { exact: exact / frames, near: near / frames, bottomExact: bExact / bFrames, read: readLines / allLines.length, sweeps: rt.totalSweeps / (PAGES * (N_LINES - 1)) };
 }
 
 const pct = (x: number) => `${(x * 100).toFixed(0)}%`.padStart(4);
-console.log(`line height ${LINE_H}px · ${N_LINES} lines/page · ${PAGES} pages · noise σ=${NOISE}px · ${RUNS} runs each`);
-console.log("vertical gain   exact line   within ±1   exact (bottom third)   lines counted read");
+console.log(`line height ${LINE_H}px · ${N_LINES} lines/page · ${PAGES} pages · noise σ=${NOISE}px · blinks: ${BLINKS} · ${RUNS} runs each`);
+console.log("vertical gain   exact line   within ±1   exact (bottom third)   lines counted read   line jumps noticed");
 for (const gain of [1.0, 0.85, 1.15, 0.75, 1.3]) {
   const rs = Array.from({ length: RUNS }, () => runOnce(gain, 50));
   const avg = (k: keyof Result) => rs.reduce((s, r) => s + r[k], 0) / rs.length;
-  console.log(`${gain.toFixed(2).padStart(8)}       ${pct(avg("exact"))}         ${pct(avg("near"))}          ${pct(avg("bottomExact"))}                  ${pct(avg("read"))}`);
+  console.log(`${gain.toFixed(2).padStart(8)}       ${pct(avg("exact"))}         ${pct(avg("near"))}          ${pct(avg("bottomExact"))}                  ${pct(avg("read"))}                 ${pct(avg("sweeps"))}`);
+}
+
+if (process.env.RECORD) {
+  const recorder = new GazeRecorder({}, false);
+  runOnce(0.85, 50, recorder);
+  writeFileSync(process.env.RECORD, JSON.stringify(recorder));
+  console.log(`\nsaved a simulated session to ${process.env.RECORD} (try: npx tsx scripts/replay.ts ${process.env.RECORD} --linear)`);
 }

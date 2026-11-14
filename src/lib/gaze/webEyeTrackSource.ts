@@ -15,25 +15,29 @@ import type { WetRequest, WetResponse, WetTiming, WireOutput, WirePatch } from "
 
 /**
  * Which gaze estimator the reader uses (see GAZE_EVAL.md):
- *  - "webeyetrack": BlazeGaze calibrated with WebEyeTrack's own adapt() (the default);
- *  - "mediapipe": MediaPipe iris/head features → our ridge `GazeModel`.
+ *  - "mediapipe": MediaPipe iris/head features → our ridge `GazeModel` (the default);
+ *  - "webeyetrack": BlazeGaze calibrated with WebEyeTrack's own adapt();
+ *  - "hybrid": the MediaPipe features PLUS WebEyeTrack's uncalibrated output, all into our
+ *    ridge. Best in the one lab run (GAZE_EVAL.md). Experimental: it's only used when it also
+ *    does at least as well as plain "mediapipe" on your own validation dots.
  */
-export type GazeEngine = "webeyetrack" | "mediapipe";
-const ENGINES: GazeEngine[] = ["webeyetrack", "mediapipe"];
+export type GazeEngine = "webeyetrack" | "mediapipe" | "hybrid";
+const ENGINES: GazeEngine[] = ["webeyetrack", "mediapipe", "hybrid"];
 
 /**
  * Feature flag. Default "mediapipe" (MediaPipe features + ridge regression): in the one
  * side-by-side run we have (GAZE_EVAL.md) it was far steadier vertically than WebEyeTrack
  * (0.9 vs 2.5 lines per frame), and vertical accuracy is what decides the line you're on.
- * To try WebEyeTrack, set NEXT_PUBLIC_GAZE_ENGINE=webeyetrack (build time) or add
- * ?gaze=webeyetrack to the URL.
+ * To try another engine, set NEXT_PUBLIC_GAZE_ENGINE=webeyetrack|hybrid (build time) or add
+ * ?gaze=webeyetrack or ?gaze=hybrid to the URL.
  */
 export function gazeEngine(): GazeEngine {
   if (typeof window !== "undefined") {
     const q = new URLSearchParams(window.location.search).get("gaze") as GazeEngine | null;
     if (q && ENGINES.includes(q)) return q;
   }
-  return process.env.NEXT_PUBLIC_GAZE_ENGINE === "webeyetrack" ? "webeyetrack" : "mediapipe";
+  const env = process.env.NEXT_PUBLIC_GAZE_ENGINE as GazeEngine | undefined;
+  return env && ENGINES.includes(env) ? env : "mediapipe";
 }
 
 /** Anything that turns a camera frame into a screen point (viewport CSS px). */
@@ -232,6 +236,17 @@ export class WebEyeTrackSource {
         return normToPx(this.glidePos(performance.now()) ?? l.out.normPog);
       },
     };
+  }
+
+  /**
+   * WebEyeTrack's own output for a frame, normalised to [-0.5, 0.5], whether or not it has
+   * been adapted. The "hybrid" engine never adapts it and feeds this raw signal into our
+   * ridge as two extra features. Null when there's no recent result (it lags a frame or two).
+   */
+  normFor(f: FaceFrame): [number, number] | null {
+    const l = this.latest;
+    if (!f.features || !l || f.t - l.t > WET_MAX_AGE_S) return null;
+    return this.glidePos(performance.now()) ?? l.out.normPog;
   }
 
   /** Forget previous calibration (affine + support set) before recalibrating. */

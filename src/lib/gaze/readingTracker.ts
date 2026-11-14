@@ -1,8 +1,10 @@
 // The "brain" of a reading session. Every camera frame it:
 //   • decides if you're reading, skimming, pausing, looking off the text, or away
 //   • detects return sweeps (end-of-line jumps) and feeds them to the line HMM
-//   • adds up how long your eyes spent on every word (spread by line probability)
-//   • spots re-reading (jumping back several lines) and big jumps ahead
+//   • adds up how long your eyes spent on every word (by line probability, and by where
+//     along the line the eyes are, so a half-read line isn't counted as fully read)
+//   • counts how many times each line was read to its end ("passes")
+//   • spots re-reading (jumping back several lines, or extra passes) and big jumps ahead
 //   • decides when to show the gentle "your place was here" marker
 // At the end it turns all of that into a SessionReport.
 import type { FaceFrame } from "./faceTracker";
@@ -25,6 +27,25 @@ export const SEC_PER_WORD = 60 / 240;
 // from the reading calibration; else SEC_PER_WORD). At 240 wpm that means:
 const READ_RATIO = 0.35; // ≥35% of normal time on a word → read  (i.e. faster than ~690 wpm is not "reading")
 const SKIM_RATIO = 0.15; // 15–35% → skimmed (~700–1600 wpm); below → skipped
+/**
+ * How a frame's time on a line is shared among that line's words: this share goes evenly to
+ * every word, the rest goes to the words near where the eyes are, left to right. Left-right
+ * is the webcam's better axis, so this is what separates "read the whole line" from "read
+ * the first half and dropped down" (skimming). The even share keeps a sideways calibration
+ * offset from starving the words at one end of every line.
+ */
+const EVEN_SHARE = 0.4;
+/**
+ * Re-reading by passes: a paragraph counts as re-read when it got at least this many lines'
+ * worth of extra passes and this many lines' worth of extra time (see buildReport). Picked
+ * with scripts/simulate-behaviors.ts: about 3 in 4 single re-read lines caught, with no false
+ * alarms in ~1,600 normally read paragraphs. Lower values catch a few more and start to
+ * flag ordinary reading (0.4 / 0.25 gave 1% false alarms).
+ */
+const EXTRA_PASS_LINES = 0.5;
+const EXTRA_TIME_LINES = 0.2;
+/** Longest gap without eye data (seconds) that still counts as a blink rather than looking away. */
+const BLINK_GAP_S = 0.45;
 /** "Skimming" state: moving down lines this many times faster than your normal pace. */
 const SKIM_SPEEDUP = 2.75; // at 240 wpm and ~11 words a line ≈ 1 line/s, the old fixed threshold
 
@@ -48,9 +69,26 @@ export interface DebugSnapshot {
   biasY: number;
   gain: number;
   sweeps: number;
+  /** Return sweeps detected since the session started. */
+  totalSweeps: number;
   fps: number;
   face: boolean;
 }
+
+/**
+ * Something that wants a copy of everything the tracker is fed (see recorder.ts). Attach
+ * with `attachTap` right after creating the tracker.
+ */
+export interface TrackerTap {
+  start(opts: TrackerOptions, t0: number): void;
+  restore(state: ResumeState): void;
+  setPage(lines: LineBox[], page: number, now: number, reason: "turn" | "relayout", byKeyboard: boolean): void;
+  frame(frame: FaceFrame | null, gaze: { x: number; y: number } | null, fast: { x: number; y: number } | null, now: number, fps: number): void;
+  visibility(hidden: boolean, now: number): void;
+  retune(sigmaY: number, biasY: number, mode: TrackingMode, alignedByReading: boolean, now: number): void;
+}
+
+export type TrackerOptions = Options;
 
 interface Options {
   mode: TrackingMode;
@@ -83,6 +121,15 @@ const ALIGNED_BIAS_TAU = 4;
 export class ReadingTracker {
   readonly wordDwell: Float64Array;
   readonly wordRereads: Int32Array;
+  /**
+   * How many times each word's line was read to its end (a "pass"). Every jump back to the
+   * left margin, and every forward page turn, completes a pass of the line the eyes were on.
+   * One read gives about 1 everywhere; a line read twice gives about 2 there. This catches
+   * re-reading a single line, which never moves the eyes far enough up the page to notice.
+   */
+  private wordPasses: Float32Array;
+  private lineWordsSum = 0;
+  private lineWordsN = 0;
   private hmm: LineHmm;
   private lines: LineBox[] = [];
   private page = 0;
@@ -149,6 +196,7 @@ export class ReadingTracker {
   constructor(private opts: Options, now: number) {
     this.wordDwell = new Float64Array(opts.totalWords);
     this.wordRereads = new Int32Array(opts.totalWords);
+    this.wordPasses = new Float32Array(opts.totalWords);
     this.hmm = new LineHmm(opts.sigmaY, Math.max(60, opts.sigmaY));
     this.hmm.biasY = opts.initialBiasY;
     this.applyBiasLimits();
@@ -159,6 +207,25 @@ export class ReadingTracker {
 
   get mode() {
     return this.opts.mode;
+  }
+
+  private tap: TrackerTap | null = null;
+
+  /** Send a copy of everything this tracker is fed to `tap` (call right after creating it). */
+  attachTap(tap: TrackerTap, now = this.t0) {
+    this.tap = tap;
+    tap.start({ ...this.opts }, this.t0);
+    // Attached part-way through a session: tell it which page is showing.
+    if (this.lines.length) tap.setPage(this.lines, this.page, now, "relayout", false);
+  }
+
+  detachTap() {
+    this.tap = null;
+  }
+
+  /** The drift corrections learned so far (for diagnostics). */
+  debugBias() {
+    return { biasY: this.hmm.biasY, gain: this.hmm.gain };
   }
 
   /** Normal seconds per word for this reader: their own pace if measured, else typical. */
@@ -183,7 +250,8 @@ export class ReadingTracker {
   }
 
   /** Re-tune after a recalibration. */
-  retune(sigmaY: number, biasY: number, mode: TrackingMode, alignedByReading = false) {
+  retune(sigmaY: number, biasY: number, mode: TrackingMode, alignedByReading = false, now = this.lastT ?? this.t0) {
+    this.tap?.retune(sigmaY, biasY, mode, alignedByReading, now);
     // Switching from focus-only to eye tracking mid-session: we don't know the line yet.
     if (mode === "gaze" && this.opts.mode !== "gaze") this.hmm.setLines(this.lines, "spread");
     this.opts.mode = mode;
@@ -226,11 +294,20 @@ export class ReadingTracker {
 
   /** Called when the page changes (or the layout is rebuilt). */
   setPage(lines: LineBox[], page: number, now: number, reason: "turn" | "relayout", byKeyboard = false) {
+    this.tap?.setPage(lines, page, now, reason, byKeyboard);
+    if (page !== this.page || !this.lineWordsN) {
+      for (const l of lines) {
+        this.lineWordsSum += l.lastWord - l.firstWord + 1;
+        this.lineWordsN++;
+      }
+    }
     const prevPage = this.page;
     const prevLines = this.lines;
     if (reason === "turn" && page !== prevPage) {
       this.pagesTurned++;
       if (page > prevPage) this.checkRushedPage(prevLines, prevPage, now);
+      // Turning forward ends a pass of the last line you were on (there's no sweep to see).
+      if (page === prevPage + 1 && this.opts.mode === "gaze" && !this.anchoring && (this.state === "reading" || this.state === "skimming")) this.countPass();
       if (page === prevPage + 1 && byKeyboard) this.learnGain(prevLines, now);
     }
     this.lines = lines;
@@ -294,6 +371,7 @@ export class ReadingTracker {
 
   // ---------- tab visibility ----------
   onVisibility(hidden: boolean, now: number) {
+    this.tap?.visibility(hidden, now);
     const t = now - this.t0;
     if (hidden) {
       this.tabHiddenAt = now;
@@ -308,6 +386,7 @@ export class ReadingTracker {
 
   // ---------- per-frame update ----------
   onFrame(frame: FaceFrame | null, gaze: { x: number; y: number } | null, gazeFast: { x: number; y: number } | null, now: number, fps = 0) {
+    this.tap?.frame(frame, gaze, gazeFast, now, fps);
     if (this.tabHiddenAt !== null) return;
     const dt = this.lastT === null ? 1 / 30 : Math.min(0.25, Math.max(0, now - this.lastT));
     this.lastT = now;
@@ -333,6 +412,11 @@ export class ReadingTracker {
     // 2) Return-sweep detection (big, fast leftward jump of the gaze)
     let sweep = false;
     if (mode === "gaze" && gazeFast && frame?.features) {
+      // A blink hides the eyes for a moment, and people often blink exactly as they jump to
+      // the next line. Keep the gaze history across such short gaps, or that jump is missed.
+      // Only a long gap (looked away) starts the history over.
+      const last = this.gazeHist[this.gazeHist.length - 1];
+      if (last && now - last.t > BLINK_GAP_S) this.gazeHist = [];
       this.gazeHist.push({ t: now, ...gazeFast });
       while (this.gazeHist.length && now - this.gazeHist[0].t > 1.2) this.gazeHist.shift();
       if (lines.length && now - this.lastSweep > 0.7) {
@@ -352,8 +436,6 @@ export class ReadingTracker {
           }
         }
       }
-    } else if (!frame?.features) {
-      this.gazeHist = [];
     }
     while (this.sweepTimes.length && t - this.sweepTimes[0] > 20) this.sweepTimes.shift();
 
@@ -385,11 +467,15 @@ export class ReadingTracker {
         }
         this.anchoring = false;
         this.hmm.pin(0);
-        if (sweep) this.hmm.predict(dt, true);
+        if (sweep) {
+          this.countPass();
+          this.hmm.predict(dt, true);
+        }
       } else {
         this.hmm.pin(0);
       }
     } else if (mode === "gaze" && lines.length) {
+      if (sweep) this.countPass();
       this.hmm.predict(dt, sweep);
       if (inst === "away") this.hmm.observe(null, true, dt);
       else if (gaze && frame?.features) {
@@ -421,12 +507,29 @@ export class ReadingTracker {
     const nowOnText = this.state === "reading" || this.state === "skimming" || this.state === "pausing";
     if (nowOnText && lines.length) {
       if (mode === "gaze") {
+        // The quicker-reacting gaze point follows the eyes along the line; the smooth one lags.
+        const x = frame?.features ? (gazeFast ?? gaze)?.x : undefined;
         for (let i = 0; i < lines.length; i++) {
           const share = this.hmm.p[i] * dt;
           if (share < 1e-5) continue;
           const L = lines[i];
-          const per = share / this.wordsIn(L);
-          for (let w = L.firstWord; w <= L.lastWord; w++) this.wordDwell[w] += per;
+          const n = this.wordsIn(L);
+          const per = share / n;
+          if (x === undefined || n < 3) {
+            for (let w = L.firstWord; w <= L.lastWord; w++) this.wordDwell[w] += per;
+            continue;
+          }
+          // Part evenly, part to the words near the eyes (see EVEN_SHARE).
+          const width = L.right - L.left;
+          const sx = Math.max(50, 0.12 * width);
+          let sum = 0;
+          const wts = this.scratch.length >= n ? this.scratch : (this.scratch = new Float64Array(n * 2));
+          for (let k = 0; k < n; k++) {
+            const z = (x - (L.left + ((k + 0.5) / n) * width)) / sx;
+            sum += wts[k] = Math.exp(-0.5 * z * z) + 1e-9;
+          }
+          const near = (share * (1 - EVEN_SHARE)) / sum;
+          for (let k = 0; k < n; k++) this.wordDwell[L.firstWord + k] += per * EVEN_SHARE + near * wts[k];
         }
       } else {
         // Without gaze we only know you're facing the page: spread time evenly over it.
@@ -449,6 +552,7 @@ export class ReadingTracker {
       biasY: this.hmm.biasY,
       gain: this.hmm.gain,
       sweeps: this.sweepTimes.length,
+      totalSweeps: this.totalSweeps,
       fps,
       face: !!frame?.face,
     });
@@ -583,6 +687,22 @@ export class ReadingTracker {
     }
   }
 
+  private scratch = new Float64Array(64);
+
+  /** The eyes just finished a line (return sweep or page turn): credit a pass to it. */
+  private countPass() {
+    const lines = this.lines;
+    // Share one whole pass among the lines, by how likely each is (ignoring "off the text").
+    let onLines = 0;
+    for (let i = 0; i < lines.length; i++) onLines += this.hmm.p[i];
+    if (onLines < 0.2) return;
+    for (let i = 0; i < lines.length; i++) {
+      const p = this.hmm.p[i] / onLines;
+      if (p < 0.01) continue;
+      for (let w = lines[i].firstWord; w <= lines[i].lastWord; w++) this.wordPasses[w] += p;
+    }
+  }
+
   private addRegression(r: { from: number; to: number }) {
     for (let w = r.from; w <= r.to; w++) this.wordRereads[w]++;
     this.regressions.push(r);
@@ -633,6 +753,7 @@ export class ReadingTracker {
 
   /** Continue a paused session: the clock picks up at its old elapsed time. */
   restore(s: ResumeState, now: number) {
+    this.tap?.restore(s);
     if (s.wordDwell.length === this.wordDwell.length) this.wordDwell.set(s.wordDwell);
     if (s.wordRereads.length === this.wordRereads.length) this.wordRereads.set(s.wordRereads);
     this.segments = [...s.segments];
@@ -702,6 +823,17 @@ export class ReadingTracker {
     // Lingering far longer than YOUR usual pace on a paragraph also signals re-reading / struggle.
     const ratios = paraStats.filter((p) => p.status === "read" && p.words >= 8).map((p) => p.dwellSec / p.expectedSec).sort((a, b) => a - b);
     const typical = ratios.length ? ratios[ratios.length >> 1] : 1;
+    // Lines read twice: more passes than one read needs (about a line's worth or more), AND
+    // the extra time to match. Either alone is too easy to get by accident.
+    const passWords = new Array(paraStats.length).fill(0);
+    for (let w = 0; w < totalWords; w++) passWords[wordParagraph[w]] += this.wordPasses[w];
+    const lineWords = this.lineWordsN ? this.lineWordsSum / this.lineWordsN : 11;
+    paraStats.forEach((p, i) => {
+      if (p.rereads > 0 || p.status !== "read" || p.words < 8) return;
+      const extraPassWords = passWords[i] - p.words;
+      const extraSec = p.dwellSec - typical * p.expectedSec;
+      if (extraPassWords >= EXTRA_PASS_LINES * lineWords && extraSec >= EXTRA_TIME_LINES * lineWords * this.spw) p.rereads = 1;
+    });
     for (const p of paraStats) {
       if (p.rereads === 0 && p.status === "read" && p.words >= 8 && p.dwellSec / p.expectedSec >= Math.max(1, typical * 1.6)) p.rereads = 1;
     }
