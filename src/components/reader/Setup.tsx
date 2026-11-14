@@ -30,6 +30,7 @@ export function Setup({
   onSkipTracking,
   title,
   backHref,
+  resuming = false,
 }: {
   tracker: FaceTracker;
   video: HTMLVideoElement | null;
@@ -39,6 +40,7 @@ export function Setup({
   onSkipTracking: (mode: "attention" | "none") => void;
   title: string;
   backHref: string;
+  resuming?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const latest = useRef<FaceFrame | null>(null);
@@ -152,7 +154,7 @@ export function Setup({
 
           <div className="space-y-4">
             <div>
-              <div className="text-xs font-semibold uppercase tracking-wider text-muted">Getting ready</div>
+              <div className="text-xs font-semibold uppercase tracking-wider text-muted">{resuming ? "Picking up where you left off" : "Getting ready"}</div>
               <h1 className="text-lg font-semibold mt-1 leading-snug">{title}</h1>
             </div>
             <ul className="card divide-y divide-border text-sm">

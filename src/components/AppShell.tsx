@@ -15,17 +15,22 @@ export function AppShell({ user, children }: { user: User; children: ReactNode }
           </Link>
           <nav className="hidden sm:flex items-center gap-1 text-sm">
             <Link href="/dashboard" className="px-3 py-1.5 rounded-lg text-muted hover:text-fg hover:bg-surface-2">
-              Dashboard
+              {user.role === "professor" ? "My courses" : "Dashboard"}
             </Link>
             <Link href="/readings/new" className="px-3 py-1.5 rounded-lg text-muted hover:text-fg hover:bg-surface-2">
               {user.role === "professor" ? "Post a reading" : "Upload a reading"}
             </Link>
+            {user.role === "student" && (
+              <Link href="/habits" className="px-3 py-1.5 rounded-lg text-muted hover:text-fg hover:bg-surface-2">
+                Reading habits
+              </Link>
+            )}
           </nav>
           <div className="ml-auto flex items-center gap-2">
             <ThemeToggle />
             <div className="hidden sm:flex flex-col items-end leading-tight px-2">
               <span className="text-sm font-medium">{user.name}</span>
-              <span className="text-[11px] text-muted capitalize">{user.role}</span>
+              <span className="text-[11px] text-muted">{user.role === "professor" ? "Teacher" : "Student"}</span>
             </div>
             <LogoutButton />
           </div>

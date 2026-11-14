@@ -1,23 +1,18 @@
-// A tiny JSON-file database. Perfect for a hackathon demo: no setup, data lives in
-// read-assist/data/db.json and you can open it in any editor. (Swap for Postgres later.)
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+// The database. It's SQLite (via libSQL), so:
+//   • on your laptop it's a single file: read-assist/data/read-assist.db (no setup)
+//   • when the site is hosted, set DATABASE_URL (+ DATABASE_AUTH_TOKEN) to a free Turso
+//     database and the exact same code talks to it over the network.
+// The first time it starts, anything in the old data/db.json is copied in, so no test data is lost.
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
-import type { ClassDigest, Course, Enrollment, Reading, Session, User } from "./types";
+import { createClient, type Client, type InStatement, type Row } from "@libsql/client";
+import type { ClassDigest, Course, LessonPlan, Reading, ResumeState, Session, SessionStatus, User } from "./types";
 import { countWords, toParagraphs } from "./text";
 import { SAMPLE_TEXT, SAMPLE_TITLE } from "./sample";
 
-interface DbShape {
-  users: User[];
-  courses: Course[];
-  enrollments: Enrollment[];
-  readings: Reading[];
-  sessions: Session[];
-  digests: ClassDigest[];
-}
-
 const DATA_DIR = path.join(process.cwd(), "data");
-const DB_FILE = path.join(DATA_DIR, "db.json");
+const LEGACY_JSON = path.join(DATA_DIR, "db.json");
 
 export function newId(prefix: string): string {
   return `${prefix}_${randomBytes(6).toString("hex")}`;
@@ -26,229 +21,458 @@ export function newId(prefix: string): string {
 function makeJoinCode(): string {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let code = "";
-  const bytes = randomBytes(6);
-  for (const b of bytes) code += alphabet[b % alphabet.length];
+  for (const b of randomBytes(6)) code += alphabet[b % alphabet.length];
   return code;
 }
 
-function seed(): DbShape {
+// ---------- connection + schema ----------
+const SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS users (
+     id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, role TEXT NOT NULL,
+     password_hash TEXT, demo INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS courses (
+     id TEXT PRIMARY KEY, name TEXT NOT NULL, code TEXT NOT NULL, term TEXT NOT NULL DEFAULT '',
+     professor_id TEXT NOT NULL REFERENCES users(id), join_code TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS enrollments (
+     course_id TEXT NOT NULL REFERENCES courses(id), user_id TEXT NOT NULL REFERENCES users(id),
+     joined_at TEXT NOT NULL, PRIMARY KEY (course_id, user_id))`,
+  `CREATE TABLE IF NOT EXISTS readings (
+     id TEXT PRIMARY KEY, title TEXT NOT NULL, paragraphs TEXT NOT NULL, word_count INTEGER NOT NULL,
+     owner_id TEXT NOT NULL REFERENCES users(id), course_id TEXT REFERENCES courses(id), due_date TEXT,
+     instructions TEXT NOT NULL DEFAULT '', source TEXT NOT NULL, created_at TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS readings_course ON readings(course_id)`,
+  `CREATE TABLE IF NOT EXISTS sessions (
+     id TEXT PRIMARY KEY, reading_id TEXT NOT NULL REFERENCES readings(id), user_id TEXT NOT NULL REFERENCES users(id),
+     started_at TEXT NOT NULL, ended_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'done', sittings INTEGER NOT NULL DEFAULT 1,
+     report TEXT NOT NULL, ai TEXT, recall TEXT, resume TEXT)`,
+  `CREATE INDEX IF NOT EXISTS sessions_reading ON sessions(reading_id)`,
+  `CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id)`,
+  `CREATE TABLE IF NOT EXISTS digests (
+     reading_id TEXT PRIMARY KEY REFERENCES readings(id), text TEXT NOT NULL, generated_by TEXT NOT NULL, created_at TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS lesson_plans (
+     reading_id TEXT PRIMARY KEY REFERENCES readings(id), text TEXT NOT NULL, generated_by TEXT NOT NULL,
+     created_at TEXT NOT NULL, based_on_sessions INTEGER NOT NULL)`,
+];
+
+const g = globalThis as unknown as { __raClient?: Client; __raReady?: Promise<void> };
+
+function client(): Client {
+  if (!g.__raClient) {
+    const url = process.env.DATABASE_URL;
+    if (!url) mkdirSync(DATA_DIR, { recursive: true });
+    g.__raClient = createClient({
+      url: url || `file:${path.join(DATA_DIR, "read-assist.db")}`,
+      authToken: process.env.DATABASE_AUTH_TOKEN || undefined,
+    });
+  }
+  return g.__raClient;
+}
+
+async function db(): Promise<Client> {
+  g.__raReady ??= init().catch((e) => {
+    g.__raReady = undefined; // retry next request
+    throw e;
+  });
+  await g.__raReady;
+  return client();
+}
+
+async function init() {
+  const c = client();
+  await c.batch(SCHEMA, "write");
+  const { rows } = await c.execute("SELECT COUNT(*) AS n FROM users");
+  if (Number(rows[0].n) > 0) return;
+  if (existsSync(LEGACY_JSON)) await importLegacyJson(c);
+  else await seed(c);
+}
+
+// ---------- row mappers ----------
+const json = <T>(v: unknown, fallback: T): T => (typeof v === "string" && v ? (JSON.parse(v) as T) : fallback);
+const str = (v: unknown) => (v === null || v === undefined ? null : String(v));
+
+function toUser(r: Row): User {
+  return { id: String(r.id), name: String(r.name), email: String(r.email), role: r.role as User["role"], createdAt: String(r.created_at), demo: !!Number(r.demo) };
+}
+function toCourse(r: Row): Course {
+  return {
+    id: String(r.id), name: String(r.name), code: String(r.code), term: String(r.term),
+    professorId: String(r.professor_id), joinCode: String(r.join_code), createdAt: String(r.created_at),
+  };
+}
+function toReading(r: Row): Reading {
+  return {
+    id: String(r.id), title: String(r.title), paragraphs: json<string[]>(r.paragraphs, []), wordCount: Number(r.word_count),
+    ownerId: String(r.owner_id), courseId: str(r.course_id), dueDate: str(r.due_date), instructions: String(r.instructions ?? ""),
+    source: r.source as Reading["source"], createdAt: String(r.created_at),
+  };
+}
+function toSession(r: Row, withResume = false): Session {
+  return {
+    id: String(r.id), readingId: String(r.reading_id), userId: String(r.user_id), startedAt: String(r.started_at),
+    endedAt: String(r.ended_at), status: (r.status as SessionStatus) ?? "done", sittings: Number(r.sittings ?? 1),
+    report: json(r.report, null as unknown as Session["report"]), ai: json(r.ai, null), recall: json(r.recall, undefined),
+    resume: withResume ? json<ResumeState | null>(r.resume, null) : undefined,
+  };
+}
+// The resume blob can be large (one number per word); only load it when needed.
+const SESSION_COLS = "id, reading_id, user_id, started_at, ended_at, status, sittings, report, ai, recall";
+
+// ---------- seed / import ----------
+async function seed(c: Client) {
   const now = new Date().toISOString();
-  const prof: User = {
-    id: "user_demo_prof",
-    name: "Prof. Rivera",
-    email: "prof@demo.edu",
-    role: "professor",
-    createdAt: now,
-  };
-  const course: Course = {
-    id: "course_demo",
-    name: "Cognitive Science of Learning",
-    code: "PSYC 214",
-    term: "Fall 2026",
-    professorId: prof.id,
-    joinCode: "READ01",
-    createdAt: now,
-  };
   const paragraphs = toParagraphs(SAMPLE_TEXT);
   // Due in 5 days, stored as noon UTC on that calendar day (see formatDueDate).
   const due = new Date(Date.now() + 5 * 864e5).toISOString().slice(0, 10) + "T12:00:00.000Z";
-  const reading: Reading = {
-    id: "reading_demo",
-    title: SAMPLE_TITLE,
-    paragraphs,
-    wordCount: countWords(paragraphs),
-    ownerId: prof.id,
-    courseId: course.id,
-    dueDate: due,
-    instructions: "Read before Thursday's lecture on attention. Focus on regressions and return sweeps.",
-    source: "sample",
-    createdAt: now,
-  };
-  return { users: [prof], courses: [course], enrollments: [], readings: [reading], sessions: [], digests: [] };
+  await c.batch(
+    [
+      { sql: "INSERT INTO users (id,name,email,role,demo,created_at) VALUES (?,?,?,?,1,?)", args: ["user_demo_prof", "Prof. Rivera", "prof@demo.edu", "professor", now] },
+      { sql: "INSERT INTO users (id,name,email,role,demo,created_at) VALUES (?,?,?,?,1,?)", args: ["user_demo_student", "Sam Student", "student@demo.edu", "student", now] },
+      {
+        sql: "INSERT INTO courses (id,name,code,term,professor_id,join_code,created_at) VALUES (?,?,?,?,?,?,?)",
+        args: ["course_demo", "Cognitive Science of Learning", "PSYC 214", "Fall 2026", "user_demo_prof", "READ01", now],
+      },
+      { sql: "INSERT INTO enrollments (course_id,user_id,joined_at) VALUES (?,?,?)", args: ["course_demo", "user_demo_student", now] },
+      {
+        sql: "INSERT INTO readings (id,title,paragraphs,word_count,owner_id,course_id,due_date,instructions,source,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        args: [
+          "reading_demo", SAMPLE_TITLE, JSON.stringify(paragraphs), countWords(paragraphs), "user_demo_prof", "course_demo", due,
+          "Read before Thursday's lecture on attention. Focus on regressions and return sweeps.", "sample", now,
+        ],
+      },
+    ],
+    "write",
+  );
 }
 
-// Keep one copy in memory across hot reloads in development.
-const g = globalThis as unknown as { __readAssistDb?: DbShape };
+interface LegacyDb {
+  users: User[];
+  courses: Course[];
+  enrollments: { courseId: string; userId: string; joinedAt: string }[];
+  readings: Reading[];
+  sessions: Session[];
+  digests?: ClassDigest[];
+}
 
-function load(): DbShape {
-  if (g.__readAssistDb) return g.__readAssistDb;
-  let data: DbShape;
-  if (existsSync(DB_FILE)) {
-    data = JSON.parse(readFileSync(DB_FILE, "utf8")) as DbShape;
-    data.digests ??= [];
-  } else {
-    data = seed();
-    persist(data);
+async function importLegacyJson(c: Client) {
+  const d = JSON.parse(readFileSync(LEGACY_JSON, "utf8")) as LegacyDb;
+  const stmts: InStatement[] = [];
+  // Accounts from the old demo had no passwords, so they stay one-click "demo" accounts.
+  for (const u of d.users)
+    stmts.push({ sql: "INSERT INTO users (id,name,email,role,demo,created_at) VALUES (?,?,?,?,1,?)", args: [u.id, u.name, u.email, u.role, u.createdAt] });
+  if (!d.users.some((u) => u.email === "student@demo.edu")) {
+    stmts.push({
+      sql: "INSERT INTO users (id,name,email,role,demo,created_at) VALUES (?,?,?,?,1,?)",
+      args: ["user_demo_student", "Sam Student", "student@demo.edu", "student", new Date().toISOString()],
+    });
   }
-  g.__readAssistDb = data;
-  return data;
+  for (const x of d.courses)
+    stmts.push({
+      sql: "INSERT INTO courses (id,name,code,term,professor_id,join_code,created_at) VALUES (?,?,?,?,?,?,?)",
+      args: [x.id, x.name, x.code, x.term, x.professorId, x.joinCode, x.createdAt],
+    });
+  if (!d.users.some((u) => u.email === "student@demo.edu") && d.courses.some((x) => x.id === "course_demo"))
+    stmts.push({ sql: "INSERT OR IGNORE INTO enrollments (course_id,user_id,joined_at) VALUES ('course_demo','user_demo_student',?)", args: [new Date().toISOString()] });
+  for (const e of d.enrollments)
+    stmts.push({ sql: "INSERT OR IGNORE INTO enrollments (course_id,user_id,joined_at) VALUES (?,?,?)", args: [e.courseId, e.userId, e.joinedAt] });
+  for (const r of d.readings)
+    stmts.push({
+      sql: "INSERT INTO readings (id,title,paragraphs,word_count,owner_id,course_id,due_date,instructions,source,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+      args: [r.id, r.title, JSON.stringify(r.paragraphs), r.wordCount, r.ownerId, r.courseId, r.dueDate, r.instructions ?? "", r.source, r.createdAt],
+    });
+  for (const s of d.sessions)
+    stmts.push({
+      sql: "INSERT INTO sessions (id,reading_id,user_id,started_at,ended_at,status,sittings,report,ai,recall) VALUES (?,?,?,?,?,'done',1,?,?,?)",
+      args: [s.id, s.readingId, s.userId, s.startedAt, s.endedAt, JSON.stringify(s.report), s.ai ? JSON.stringify(s.ai) : null, s.recall ? JSON.stringify(s.recall) : null],
+    });
+  for (const x of d.digests ?? [])
+    stmts.push({ sql: "INSERT INTO digests (reading_id,text,generated_by,created_at) VALUES (?,?,?,?)", args: [x.readingId, x.text, x.generatedBy, x.createdAt] });
+  await c.batch(stmts, "write");
+  console.log(`[db] imported data/db.json: ${d.users.length} users, ${d.courses.length} courses, ${d.readings.length} readings, ${d.sessions.length} sessions`);
 }
 
-function persist(data: DbShape) {
-  mkdirSync(DATA_DIR, { recursive: true });
-  const tmp = DB_FILE + ".tmp";
-  writeFileSync(tmp, JSON.stringify(data, null, 2));
-  renameSync(tmp, DB_FILE);
-}
-
-function save() {
-  persist(load());
+/** A per-install secret (used to sign login cookies when AUTH_SECRET isn't set). */
+export async function getOrCreateSecret(): Promise<string> {
+  const c = await db();
+  const { rows } = await c.execute("SELECT value FROM meta WHERE key = 'auth_secret'");
+  if (rows[0]) return String(rows[0].value);
+  const secret = randomBytes(32).toString("hex");
+  await c.execute({ sql: "INSERT OR IGNORE INTO meta (key, value) VALUES ('auth_secret', ?)", args: [secret] });
+  const again = await c.execute("SELECT value FROM meta WHERE key = 'auth_secret'");
+  return String(again.rows[0].value);
 }
 
 // ---------- Users ----------
-export function getUser(id: string | undefined | null): User | null {
+export async function getUser(id: string | undefined | null): Promise<User | null> {
   if (!id) return null;
-  return load().users.find((u) => u.id === id) ?? null;
+  const { rows } = await (await db()).execute({ sql: "SELECT * FROM users WHERE id = ?", args: [id] });
+  return rows[0] ? toUser(rows[0]) : null;
 }
 
-export function findOrCreateUser(name: string, email: string, role: User["role"]): User {
-  const db = load();
-  const normalized = email.trim().toLowerCase();
-  const existing = db.users.find((u) => u.email === normalized);
-  if (existing) return existing;
-  const user: User = { id: newId("user"), name: name.trim(), email: normalized, role, createdAt: new Date().toISOString() };
-  db.users.push(user);
-  // Make the demo feel alive: new students are auto-enrolled in the demo course.
-  if (role === "student" && db.courses.some((c) => c.id === "course_demo")) {
-    db.enrollments.push({ courseId: "course_demo", userId: user.id, joinedAt: user.createdAt });
-  }
-  save();
+export async function getUserByEmail(email: string): Promise<(User & { passwordHash: string | null }) | null> {
+  const { rows } = await (await db()).execute({ sql: "SELECT * FROM users WHERE email = ?", args: [email.trim().toLowerCase()] });
+  return rows[0] ? { ...toUser(rows[0]), passwordHash: str(rows[0].password_hash) } : null;
+}
+
+export async function createUser(name: string, email: string, role: User["role"], passwordHash: string | null): Promise<User> {
+  const user: User = { id: newId("user"), name: name.trim(), email: email.trim().toLowerCase(), role, createdAt: new Date().toISOString(), demo: false };
+  await (await db()).execute({
+    sql: "INSERT INTO users (id,name,email,role,password_hash,demo,created_at) VALUES (?,?,?,?,?,0,?)",
+    args: [user.id, user.name, user.email, user.role, passwordHash, user.createdAt],
+  });
   return user;
 }
 
+export async function demoUsers(): Promise<User[]> {
+  const { rows } = await (await db()).execute("SELECT * FROM users WHERE demo = 1 ORDER BY role, created_at");
+  return rows.map(toUser);
+}
+
 // ---------- Courses ----------
-export function coursesForUser(user: User): Course[] {
-  const db = load();
-  if (user.role === "professor") return db.courses.filter((c) => c.professorId === user.id);
-  const ids = new Set(db.enrollments.filter((e) => e.userId === user.id).map((e) => e.courseId));
-  return db.courses.filter((c) => ids.has(c.id));
+export async function coursesForUser(user: User): Promise<Course[]> {
+  const c = await db();
+  const { rows } =
+    user.role === "professor"
+      ? await c.execute({ sql: "SELECT * FROM courses WHERE professor_id = ? ORDER BY created_at", args: [user.id] })
+      : await c.execute({
+          sql: "SELECT c.* FROM courses c JOIN enrollments e ON e.course_id = c.id WHERE e.user_id = ? ORDER BY e.joined_at",
+          args: [user.id],
+        });
+  return rows.map(toCourse);
 }
 
-export function getCourse(id: string): Course | null {
-  return load().courses.find((c) => c.id === id) ?? null;
+export async function getCourse(id: string): Promise<Course | null> {
+  const { rows } = await (await db()).execute({ sql: "SELECT * FROM courses WHERE id = ?", args: [id] });
+  return rows[0] ? toCourse(rows[0]) : null;
 }
 
-export function createCourse(professorId: string, name: string, code: string, term: string): Course {
-  const db = load();
-  const course: Course = {
-    id: newId("course"),
-    name: name.trim(),
-    code: code.trim(),
-    term: term.trim(),
-    professorId,
-    joinCode: makeJoinCode(),
-    createdAt: new Date().toISOString(),
-  };
-  db.courses.push(course);
-  save();
-  return course;
-}
-
-export function joinCourse(userId: string, joinCode: string): Course | null {
-  const db = load();
-  const course = db.courses.find((c) => c.joinCode === joinCode.trim().toUpperCase());
-  if (!course) return null;
-  if (!db.enrollments.some((e) => e.courseId === course.id && e.userId === userId)) {
-    db.enrollments.push({ courseId: course.id, userId, joinedAt: new Date().toISOString() });
-    save();
+export async function createCourse(professorId: string, name: string, code: string, term: string): Promise<Course> {
+  const c = await db();
+  for (let attempt = 0; ; attempt++) {
+    const course: Course = {
+      id: newId("course"), name: name.trim(), code: code.trim(), term: term.trim(), professorId,
+      joinCode: makeJoinCode(), createdAt: new Date().toISOString(),
+    };
+    try {
+      await c.execute({
+        sql: "INSERT INTO courses (id,name,code,term,professor_id,join_code,created_at) VALUES (?,?,?,?,?,?,?)",
+        args: [course.id, course.name, course.code, course.term, professorId, course.joinCode, course.createdAt],
+      });
+      return course;
+    } catch (e) {
+      if (attempt >= 4) throw e; // join code collision: try another code
+    }
   }
+}
+
+export async function joinCourse(userId: string, joinCode: string): Promise<Course | null> {
+  const c = await db();
+  const { rows } = await c.execute({ sql: "SELECT * FROM courses WHERE join_code = ?", args: [joinCode.trim().toUpperCase()] });
+  if (!rows[0]) return null;
+  const course = toCourse(rows[0]);
+  if (course.professorId === userId) return course;
+  await c.execute({
+    sql: "INSERT OR IGNORE INTO enrollments (course_id,user_id,joined_at) VALUES (?,?,?)",
+    args: [course.id, userId, new Date().toISOString()],
+  });
   return course;
 }
 
-export function isEnrolled(userId: string, courseId: string): boolean {
-  return load().enrollments.some((e) => e.userId === userId && e.courseId === courseId);
+export async function isEnrolled(userId: string, courseId: string): Promise<boolean> {
+  const { rows } = await (await db()).execute({ sql: "SELECT 1 FROM enrollments WHERE user_id = ? AND course_id = ?", args: [userId, courseId] });
+  return rows.length > 0;
 }
 
-export function studentsInCourse(courseId: string): User[] {
-  const db = load();
-  const ids = new Set(db.enrollments.filter((e) => e.courseId === courseId).map((e) => e.userId));
-  return db.users.filter((u) => ids.has(u.id));
+export async function studentsInCourse(courseId: string): Promise<User[]> {
+  const { rows } = await (await db()).execute({
+    sql: "SELECT u.* FROM users u JOIN enrollments e ON e.user_id = u.id WHERE e.course_id = ? ORDER BY u.name COLLATE NOCASE",
+    args: [courseId],
+  });
+  return rows.map(toUser);
+}
+
+export async function studentCounts(courseIds: string[]): Promise<Map<string, number>> {
+  const m = new Map<string, number>();
+  if (!courseIds.length) return m;
+  const { rows } = await (await db()).execute({
+    sql: `SELECT course_id, COUNT(*) AS n FROM enrollments WHERE course_id IN (${courseIds.map(() => "?").join(",")}) GROUP BY course_id`,
+    args: courseIds,
+  });
+  for (const r of rows) m.set(String(r.course_id), Number(r.n));
+  return m;
 }
 
 /** Can this user see this course at all? */
-export function canViewCourse(user: User, course: Course): boolean {
-  return course.professorId === user.id || isEnrolled(user.id, course.id);
+export async function canViewCourse(user: User, course: Course): Promise<boolean> {
+  return course.professorId === user.id || (await isEnrolled(user.id, course.id));
 }
 
 // ---------- Readings ----------
-export function getReading(id: string): Reading | null {
-  return load().readings.find((r) => r.id === id) ?? null;
+export async function getReading(id: string): Promise<Reading | null> {
+  const { rows } = await (await db()).execute({ sql: "SELECT * FROM readings WHERE id = ?", args: [id] });
+  return rows[0] ? toReading(rows[0]) : null;
 }
 
-export function readingsForCourse(courseId: string): Reading[] {
-  return load()
-    .readings.filter((r) => r.courseId === courseId)
-    .sort((a, b) => (a.dueDate ?? "9").localeCompare(b.dueDate ?? "9"));
+export async function readingsForCourse(courseId: string): Promise<Reading[]> {
+  const { rows } = await (await db()).execute({
+    sql: "SELECT * FROM readings WHERE course_id = ? ORDER BY COALESCE(due_date, '9'), created_at",
+    args: [courseId],
+  });
+  return rows.map(toReading);
 }
 
-export function personalReadings(userId: string): Reading[] {
-  return load()
-    .readings.filter((r) => r.ownerId === userId && r.courseId === null)
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+export async function readingsForCourses(courseIds: string[]): Promise<Reading[]> {
+  if (!courseIds.length) return [];
+  const { rows } = await (await db()).execute({
+    sql: `SELECT * FROM readings WHERE course_id IN (${courseIds.map(() => "?").join(",")}) ORDER BY COALESCE(due_date, '9'), created_at`,
+    args: courseIds,
+  });
+  return rows.map(toReading);
 }
 
-export function canViewReading(user: User, reading: Reading): boolean {
+export async function personalReadings(userId: string): Promise<Reading[]> {
+  const { rows } = await (await db()).execute({
+    sql: "SELECT * FROM readings WHERE owner_id = ? AND course_id IS NULL ORDER BY created_at DESC",
+    args: [userId],
+  });
+  return rows.map(toReading);
+}
+
+export async function canViewReading(user: User, reading: Reading): Promise<boolean> {
   if (reading.ownerId === user.id) return true;
   if (!reading.courseId) return false;
-  const course = getCourse(reading.courseId);
-  return !!course && canViewCourse(user, course);
+  const course = await getCourse(reading.courseId);
+  return !!course && (await canViewCourse(user, course));
 }
 
-export function createReading(input: Omit<Reading, "id" | "createdAt" | "wordCount">): Reading {
-  const db = load();
-  const reading: Reading = {
-    ...input,
-    id: newId("reading"),
-    wordCount: countWords(input.paragraphs),
-    createdAt: new Date().toISOString(),
-  };
-  db.readings.push(reading);
-  save();
+export async function createReading(input: Omit<Reading, "id" | "createdAt" | "wordCount">): Promise<Reading> {
+  const reading: Reading = { ...input, id: newId("reading"), wordCount: countWords(input.paragraphs), createdAt: new Date().toISOString() };
+  await (await db()).execute({
+    sql: "INSERT INTO readings (id,title,paragraphs,word_count,owner_id,course_id,due_date,instructions,source,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+    args: [
+      reading.id, reading.title, JSON.stringify(reading.paragraphs), reading.wordCount, reading.ownerId, reading.courseId,
+      reading.dueDate, reading.instructions, reading.source, reading.createdAt,
+    ],
+  });
   return reading;
 }
 
+export async function updateReadingDueDate(id: string, dueDate: string | null) {
+  await (await db()).execute({ sql: "UPDATE readings SET due_date = ? WHERE id = ?", args: [dueDate, id] });
+}
+
 // ---------- Sessions ----------
-export function createSession(input: Omit<Session, "id">): Session {
-  const db = load();
+export async function createSession(input: Omit<Session, "id">): Promise<Session> {
   const session: Session = { ...input, id: newId("session") };
-  db.sessions.push(session);
-  save();
+  await (await db()).execute({
+    sql: "INSERT INTO sessions (id,reading_id,user_id,started_at,ended_at,status,sittings,report,ai,recall,resume) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+    args: [
+      session.id, session.readingId, session.userId, session.startedAt, session.endedAt, session.status, session.sittings,
+      JSON.stringify(session.report), session.ai ? JSON.stringify(session.ai) : null, null,
+      session.resume ? JSON.stringify(session.resume) : null,
+    ],
+  });
   return session;
 }
 
-export function saveRecall(sessionId: string, section: number, text: string): Session | null {
-  const session = load().sessions.find((s) => s.id === sessionId);
+/** Save progress on an existing session (pause again, or finish it). */
+export async function updateSession(
+  id: string,
+  patch: { endedAt: string; status: SessionStatus; sittings: number; report: Session["report"]; ai: Session["ai"]; resume: ResumeState | null },
+) {
+  await (await db()).execute({
+    sql: "UPDATE sessions SET ended_at = ?, status = ?, sittings = ?, report = ?, ai = ?, resume = ? WHERE id = ?",
+    args: [patch.endedAt, patch.status, patch.sittings, JSON.stringify(patch.report), patch.ai ? JSON.stringify(patch.ai) : null, patch.resume ? JSON.stringify(patch.resume) : null, id],
+  });
+}
+
+export async function saveRecall(sessionId: string, section: number, text: string): Promise<Session | null> {
+  const session = await getSession(sessionId);
   if (!session) return null;
-  session.recall ??= {};
-  if (text.trim()) session.recall[String(section)] = { text: text.trim(), savedAt: new Date().toISOString() };
-  else delete session.recall[String(section)];
-  if (Object.keys(session.recall).length === 0) delete session.recall;
-  save();
+  const recall = { ...(session.recall ?? {}) };
+  if (text.trim()) recall[String(section)] = { text: text.trim(), savedAt: new Date().toISOString() };
+  else delete recall[String(section)];
+  session.recall = Object.keys(recall).length ? recall : undefined;
+  await (await db()).execute({
+    sql: "UPDATE sessions SET recall = ? WHERE id = ?",
+    args: [session.recall ? JSON.stringify(session.recall) : null, sessionId],
+  });
   return session;
 }
 
-export function getSession(id: string): Session | null {
-  return load().sessions.find((s) => s.id === id) ?? null;
+export async function getSession(id: string, withResume = false): Promise<Session | null> {
+  const { rows } = await (await db()).execute({
+    sql: `SELECT ${withResume ? "*" : SESSION_COLS} FROM sessions WHERE id = ?`,
+    args: [id],
+  });
+  return rows[0] ? toSession(rows[0], withResume) : null;
 }
 
-export function sessionsFor(userId: string, readingId?: string): Session[] {
-  return load()
-    .sessions.filter((s) => s.userId === userId && (!readingId || s.readingId === readingId))
-    .sort((a, b) => b.endedAt.localeCompare(a.endedAt));
+/** The student's paused (unfinished) session for a reading, if any, with its resume state. */
+export async function pausedSession(userId: string, readingId: string): Promise<Session | null> {
+  const { rows } = await (await db()).execute({
+    sql: "SELECT * FROM sessions WHERE user_id = ? AND reading_id = ? AND status = 'paused' ORDER BY ended_at DESC LIMIT 1",
+    args: [userId, readingId],
+  });
+  return rows[0] ? toSession(rows[0], true) : null;
 }
 
-export function sessionsForReading(readingId: string): Session[] {
-  return load().sessions.filter((s) => s.readingId === readingId);
+export async function sessionsFor(userId: string, readingId?: string): Promise<Session[]> {
+  const { rows } = await (await db()).execute(
+    readingId
+      ? { sql: `SELECT ${SESSION_COLS} FROM sessions WHERE user_id = ? AND reading_id = ? ORDER BY ended_at DESC`, args: [userId, readingId] }
+      : { sql: `SELECT ${SESSION_COLS} FROM sessions WHERE user_id = ? ORDER BY ended_at DESC`, args: [userId] },
+  );
+  return rows.map((r) => toSession(r));
 }
 
-// ---------- Class digests (professor AI summaries) ----------
-export function getDigest(readingId: string): ClassDigest | null {
-  return load().digests.find((d) => d.readingId === readingId) ?? null;
+export async function sessionsForReading(readingId: string): Promise<Session[]> {
+  const { rows } = await (await db()).execute({ sql: `SELECT ${SESSION_COLS} FROM sessions WHERE reading_id = ? ORDER BY ended_at DESC`, args: [readingId] });
+  return rows.map((r) => toSession(r));
 }
 
-export function saveDigest(digest: ClassDigest) {
-  const db = load();
-  db.digests = db.digests.filter((d) => d.readingId !== digest.readingId);
-  db.digests.push(digest);
-  save();
+export async function sessionsForReadings(readingIds: string[]): Promise<Session[]> {
+  if (!readingIds.length) return [];
+  const { rows } = await (await db()).execute({
+    sql: `SELECT ${SESSION_COLS} FROM sessions WHERE reading_id IN (${readingIds.map(() => "?").join(",")}) ORDER BY ended_at DESC`,
+    args: readingIds,
+  });
+  return rows.map((r) => toSession(r));
+}
+
+// ---------- Class digests and lesson plans (professor AI) ----------
+export async function getDigest(readingId: string): Promise<ClassDigest | null> {
+  const { rows } = await (await db()).execute({ sql: "SELECT * FROM digests WHERE reading_id = ?", args: [readingId] });
+  const r = rows[0];
+  return r ? { readingId, text: String(r.text), generatedBy: r.generated_by as ClassDigest["generatedBy"], createdAt: String(r.created_at) } : null;
+}
+
+export async function saveDigest(d: ClassDigest) {
+  await (await db()).execute({
+    sql: "INSERT OR REPLACE INTO digests (reading_id,text,generated_by,created_at) VALUES (?,?,?,?)",
+    args: [d.readingId, d.text, d.generatedBy, d.createdAt],
+  });
+}
+
+export async function getLessonPlan(readingId: string): Promise<LessonPlan | null> {
+  const { rows } = await (await db()).execute({ sql: "SELECT * FROM lesson_plans WHERE reading_id = ?", args: [readingId] });
+  const r = rows[0];
+  return r
+    ? { readingId, text: String(r.text), generatedBy: r.generated_by as LessonPlan["generatedBy"], createdAt: String(r.created_at), basedOnSessions: Number(r.based_on_sessions) }
+    : null;
+}
+
+export async function saveLessonPlan(p: LessonPlan) {
+  await (await db()).execute({
+    sql: "INSERT OR REPLACE INTO lesson_plans (reading_id,text,generated_by,created_at,based_on_sessions) VALUES (?,?,?,?,?)",
+    args: [p.readingId, p.text, p.generatedBy, p.createdAt, p.basedOnSessions],
+  });
+}
+
+/** "Start over" on a reading: any older paused session is closed as it stands. */
+export async function closePausedSessions(userId: string, readingId: string) {
+  await (await db()).execute({
+    sql: "UPDATE sessions SET status = 'done', resume = NULL WHERE user_id = ? AND reading_id = ? AND status = 'paused'",
+    args: [userId, readingId],
+  });
 }

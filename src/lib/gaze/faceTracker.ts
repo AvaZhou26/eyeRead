@@ -1,7 +1,7 @@
 // Runs Google's MediaPipe Face Landmarker on the webcam (in the browser, on-device)
 // and turns its 478 face points into a compact "eye feature" vector each frame.
 // The calibration model later maps these features to a point on the screen.
-import type { FaceLandmarker, NormalizedLandmark } from "@mediapipe/tasks-vision";
+import type { FaceLandmarker, FaceLandmarkerResult, NormalizedLandmark } from "@mediapipe/tasks-vision";
 
 export interface FaceFrame {
   t: number; // seconds (performance.now / 1000)
@@ -24,6 +24,8 @@ const IRIS_2 = 473;
 const NOSE = 1;
 
 type Listener = (f: FaceFrame) => void;
+/** Raw per-frame MediaPipe output, for experimental feature sources (see /gaze-lab). */
+export type RawListener = (r: FaceLandmarkerResult, video: HTMLVideoElement, f: FaceFrame) => void;
 
 /**
  * MediaPipe's WebAssembly prints its own status lines (e.g. "INFO: Created TensorFlow Lite
@@ -58,6 +60,7 @@ export class FaceTracker {
   private raf = 0;
   private lastVideoTime = -1;
   private listeners = new Set<Listener>();
+  private rawListeners = new Set<RawListener>();
   private apertureBaseline = 0;
   private smooth: number[] | null = null;
   private frameCount = 0;
@@ -90,7 +93,7 @@ export class FaceTracker {
   async start(video: HTMLVideoElement): Promise<void> {
     if (!this.landmarker) await this.init();
     this.stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user", frameRate: { ideal: 30 } },
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user", frameRate: { ideal: 30 } },
       audio: false,
     });
     this.attach(video);
@@ -121,6 +124,11 @@ export class FaceTracker {
     return () => this.listeners.delete(fn);
   }
 
+  subscribeRaw(fn: RawListener): () => void {
+    this.rawListeners.add(fn);
+    return () => this.rawListeners.delete(fn);
+  }
+
   private loop = () => {
     this.raf = requestAnimationFrame(this.loop);
     const video = this.video;
@@ -136,8 +144,9 @@ export class FaceTracker {
     this.lastTimestamp = ts;
 
     let frame: FaceFrame;
+    let res: FaceLandmarkerResult | null = null;
     try {
-      const res = this.landmarker.detectForVideo(video, ts);
+      res = this.landmarker.detectForVideo(video, ts);
       const lm = res.faceLandmarks?.[0];
       const matrix = res.facialTransformationMatrixes?.[0]?.data;
       frame = lm ? this.extract(lm, matrix, video, nowMs / 1000) : this.empty(nowMs / 1000);
@@ -146,6 +155,7 @@ export class FaceTracker {
     }
     if (this.frameCount++ % 30 === 0) this.lastBrightness = this.sampleBrightness(video);
     frame.brightness = this.lastBrightness;
+    if (res) for (const fn of this.rawListeners) fn(res, video, frame);
     for (const fn of this.listeners) fn(frame);
   };
 

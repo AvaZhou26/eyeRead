@@ -19,3 +19,8 @@ if (!existsSync(modelPath)) {
 } else {
   console.log("✓ Face model already present");
 }
+
+// pdf.js worker, used in the browser to turn scanned PDF pages into images for text recognition.
+mkdirSync("public/pdfjs", { recursive: true });
+cpSync("node_modules/pdfjs-dist/build/pdf.worker.min.mjs", "public/pdfjs/pdf.worker.min.mjs");
+console.log("✓ Copied pdf.js worker");

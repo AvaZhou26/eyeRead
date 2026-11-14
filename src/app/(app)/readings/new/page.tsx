@@ -7,7 +7,7 @@ import { NewReadingForm } from "./NewReadingForm";
 export default async function NewReadingPage({ searchParams }: PageProps<"/readings/new">) {
   const user = await requireUser();
   const { courseId } = await searchParams;
-  const courses = user.role === "professor" ? coursesForUser(user).map((c) => ({ id: c.id, label: `${c.code}: ${c.name}` })) : [];
+  const courses = user.role === "professor" ? (await coursesForUser(user)).map((c) => ({ id: c.id, label: `${c.code}: ${c.name}` })) : [];
   return (
     <div className="max-w-3xl">
       <PageHeader

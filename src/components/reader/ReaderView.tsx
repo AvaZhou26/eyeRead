@@ -5,10 +5,11 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { isHeading, splitWords } from "@/lib/text";
 import type { FaceTracker } from "@/lib/gaze/faceTracker";
+import type { WebEyeTrackSource } from "@/lib/gaze/webEyeTrackSource";
 import type { LineBox } from "@/lib/gaze/lineHmm";
 import { OneEuroFilter } from "@/lib/gaze/oneEuro";
 import { ReadingTracker, type MarkerInfo, type ToastInfo, type TrackingMode } from "@/lib/gaze/readingTracker";
-import type { ReadingState, SessionReport } from "@/lib/types";
+import type { ReadingState, ResumeState, SessionReport } from "@/lib/types";
 import { useTheme, type ThemeChoice } from "@/components/ThemeToggle";
 import { IconBug, IconChevronLeft, IconChevronRight, IconSettings, IconX } from "@/components/icons";
 import { Calibration, type CalibrationResult } from "./Calibration";
@@ -50,18 +51,26 @@ export function ReaderView({
   title,
   paragraphs,
   tracker,
+  wet,
   mode: initialMode,
   calibration: initialCalibration,
   initialPrefs,
+  resume,
   onFinish,
+  onPause,
 }: {
   title: string;
   paragraphs: string[];
   tracker: FaceTracker | null;
+  /** WebEyeTrack source, when that engine is active (passed on to recalibration). */
+  wet?: WebEyeTrackSource | null;
   mode: TrackingMode;
   calibration: CalibrationResult | null;
   initialPrefs: ReaderPrefs;
+  /** Progress from a paused session to continue from (null = fresh session). */
+  resume: ResumeState | null;
   onFinish: (report: SessionReport) => void;
+  onPause: (report: SessionReport, state: ResumeState) => void;
 }) {
   const [prefs, setPrefs] = useState<ReaderPrefs>(initialPrefs);
   const [mode, setMode] = useState<TrackingMode>(initialMode);
@@ -82,7 +91,7 @@ export function ReaderView({
   const innerRef = useRef<HTMLDivElement>(null);
   const trackerRef = useRef<ReadingTracker | null>(null);
   const pageRef = useRef(0);
-  const firstWordOfPage = useRef(0);
+  const firstWordOfPage = useRef(resume?.firstWord ?? 0);
   const gazeDotRef = useRef<HTMLDivElement>(null);
   const lineHiRef = useRef<HTMLDivElement>(null);
   const debugRef = useRef<HTMLDivElement>(null);
@@ -244,6 +253,7 @@ export function ReaderView({
           ` · bias ${Math.round(d.biasY)}px · sweeps/20s ${d.sweeps} · ${Math.round(d.fps)} fps${d.face ? "" : " · no face"}`;
       }
     };
+    if (resume) rt.restore(resume, performance.now() / 1000);
     rt.setPage(layout.byPage[pageRef.current] ?? [], pageRef.current, performance.now() / 1000, "relayout");
     trackerRef.current = rt;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -267,9 +277,8 @@ export function ReaderView({
       const rt = trackerRef.current;
       if (!rt || recalibratingRef.current) return;
       let gaze = null, fast = null;
-      const model = calibRef.current?.model;
-      if (modeRef.current === "gaze" && model && f.features) {
-        const g = model.predict(f.features);
+      const g = modeRef.current === "gaze" ? (calibRef.current?.estimator.predict(f) ?? null) : null;
+      if (g) {
         gaze = { x: fx.filter(g.x, f.t), y: fy.filter(g.y, f.t) };
         fast = { x: qx.filter(g.x, f.t), y: qy.filter(g.y, f.t) };
       }
@@ -366,15 +375,26 @@ export function ReaderView({
     };
   }, []);
 
+  function calibInfo(): { quality: SessionReport["calibrationQuality"]; errorPx: number | null } {
+    const v = calibration?.validation;
+    if (mode === "gaze" && v) return { quality: v.quality, errorPx: Math.round(v.meanErrorPx) };
+    // Resumed in focus-only mode after an eye-tracked sitting: keep the earlier calibration info.
+    if (resume && resume.calibrationQuality !== "attention-only") return { quality: resume.calibrationQuality, errorPx: resume.calibrationErrorPx };
+    return { quality: "attention-only", errorPx: null };
+  }
+
   function finish() {
     const rt = trackerRef.current;
     if (!rt) return;
-    const v = calibration?.validation;
-    const report = rt.buildReport(performance.now() / 1000, paragraphs, {
-      quality: mode === "gaze" && v ? v.quality : "attention-only",
-      errorPx: mode === "gaze" && v ? Math.round(v.meanErrorPx) : null,
-    });
-    onFinish(report);
+    onFinish(rt.buildReport(performance.now() / 1000, paragraphs, calibInfo()));
+  }
+
+  function pause() {
+    const rt = trackerRef.current;
+    if (!rt) return;
+    const now = performance.now() / 1000;
+    const info = calibInfo();
+    onPause(rt.buildReport(now, paragraphs, info), rt.exportState(now, firstWordOfPage.current, info));
   }
 
   const lastPage = layout ? page >= layout.pages - 1 : false;
@@ -419,6 +439,9 @@ export function ReaderView({
         <div className="ml-auto flex items-center gap-2">
           <button className="btn btn-ghost !px-2.5 !py-1.5 text-muted" onClick={() => setSettingsOpen((o) => !o)} aria-label="Reader settings">
             <IconSettings size={16} />
+          </button>
+          <button className="btn btn-ghost !py-1.5 text-sm" onClick={pause} title="Save your progress and come back later">
+            Pause
           </button>
           <button className="btn btn-ghost !py-1.5 text-sm" onClick={() => (lastPage ? finish() : setConfirmFinish(true))}>
             Finish session
@@ -592,9 +615,11 @@ export function ReaderView({
             <h3 className="font-semibold text-lg">Finish this session?</h3>
             <p className="text-muted text-sm mt-1.5">
               You&apos;re on page {page + 1} of {layout?.pages}. Pages you haven&apos;t opened will count as skipped, and we&apos;ll summarize them for you.
+              Need a break instead? <b className="text-fg">Pause</b> saves your place and your progress so far.
             </p>
             <div className="flex justify-end gap-2 mt-5">
               <button className="btn btn-ghost" onClick={() => setConfirmFinish(false)}>Keep reading</button>
+              <button className="btn btn-ghost" onClick={pause}>Pause for later</button>
               <button className="btn btn-primary" onClick={finish}>Finish</button>
             </div>
           </div>
@@ -604,6 +629,7 @@ export function ReaderView({
       {recalibrating && tracker && (
         <Calibration
           tracker={tracker}
+          wet={wet}
           lineHeight={lineH}
           onCancel={() => setRecalibrating(false)}
           onAttentionOnly={() => {

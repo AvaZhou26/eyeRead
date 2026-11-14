@@ -42,5 +42,6 @@ next-env.d.ts
 
 # Read Assist
 /public/mediapipe
+/public/pdfjs
 /data
 !.env.example

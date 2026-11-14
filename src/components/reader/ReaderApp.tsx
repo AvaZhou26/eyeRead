@@ -3,8 +3,9 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { FaceTracker } from "@/lib/gaze/faceTracker";
+import { gazeEngine, WebEyeTrackSource } from "@/lib/gaze/webEyeTrackSource";
 import type { TrackingMode } from "@/lib/gaze/readingTracker";
-import type { SessionReport } from "@/lib/types";
+import type { ResumeState, SessionReport } from "@/lib/types";
 import { Calibration, type CalibrationResult } from "./Calibration";
 import { ReaderView, lineHeightFor, loadPrefs, type ReaderPrefs } from "./ReaderView";
 import { Setup, type CameraState } from "./Setup";
@@ -16,11 +17,14 @@ export function ReaderApp({
   title,
   paragraphs,
   backHref,
+  resume,
 }: {
   readingId: string;
   title: string;
   paragraphs: string[];
   backHref: string;
+  /** A paused session to continue, if the student has one for this reading. */
+  resume: { sessionId: string; state: ResumeState } | null;
 }) {
   const router = useRouter();
   const [phase, setPhase] = useState<Phase>("setup");
@@ -31,16 +35,33 @@ export function ReaderApp({
   const [saveError, setSaveError] = useState("");
   const [video, setVideo] = useState<HTMLVideoElement | null>(null);
   const [tracker] = useState(() => new FaceTracker());
+  // WebEyeTrack (default engine) rides on the FaceTracker's frames; null = MediaPipe + ridge.
+  const [wet, setWet] = useState<WebEyeTrackSource | null>(null);
+  const wetLoad = useRef<Promise<WebEyeTrackSource | null> | null>(null);
   const startedAt = useRef(new Date().toISOString());
-  const pendingReport = useRef<SessionReport | null>(null);
+  const pendingSave = useRef<{ report: SessionReport; state: ResumeState | null } | null>(null);
+  const [pausing, setPausing] = useState(false);
 
   useEffect(() => () => tracker.stop(), [tracker]);
+  useEffect(() => () => wet?.detach(), [wet]);
+
+  /** Load WebEyeTrack once. If it fails, fall back to the MediaPipe + ridge pipeline. */
+  function loadWet(): Promise<WebEyeTrackSource | null> {
+    if (gazeEngine() !== "webeyetrack") return Promise.resolve(null);
+    wetLoad.current ??= WebEyeTrackSource.create().catch((e) => {
+      console.warn("[webeyetrack] unavailable, using MediaPipe + ridge", e);
+      return null;
+    });
+    return wetLoad.current;
+  }
 
   async function startCamera() {
     if (!video) return;
     setCameraState("loading");
     try {
-      await tracker.start(video);
+      const [, w] = await Promise.all([tracker.start(video), loadWet()]);
+      if (w) w.attach(tracker);
+      setWet(w);
       setCameraState("on");
     } catch (e) {
       const name = (e as DOMException)?.name;
@@ -74,21 +95,32 @@ export function ReaderApp({
     setPhase("reading");
   }
 
-  async function save(report: SessionReport) {
-    pendingReport.current = report;
+  // Finishing (state = null) builds the report; pausing (state given) saves progress to resume later.
+  async function save(report: SessionReport, state: ResumeState | null) {
+    pendingSave.current = { report, state };
+    setPausing(!!state);
     setPhase("saving");
     setSaveError("");
+    wet?.detach();
     tracker.stop();
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
     try {
       const res = await fetch("/api/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ readingId, startedAt: startedAt.current, endedAt: new Date().toISOString(), report }),
+        body: JSON.stringify({
+          readingId,
+          sessionId: resume?.sessionId ?? null,
+          startedAt: startedAt.current,
+          endedAt: new Date().toISOString(),
+          status: state ? "paused" : "done",
+          report,
+          resume: state,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Save failed");
-      router.push(`/reports/${data.id}`);
+      router.push(state ? `${backHref}?paused=1` : `/reports/${data.id}`);
     } catch (e) {
       setSaveError((e as Error).message);
     }
@@ -129,12 +161,14 @@ export function ReaderApp({
           }}
           title={title}
           backHref={backHref}
+          resuming={!!resume}
         />
       )}
 
       {phase === "calibrate" && (
         <Calibration
           tracker={tracker}
+          wet={wet}
           lineHeight={lineH}
           onCancel={() => setPhase("setup")}
           onAttentionOnly={() => beginReading("attention", null)}
@@ -147,10 +181,13 @@ export function ReaderApp({
           title={title}
           paragraphs={paragraphs}
           tracker={mode === "none" ? null : tracker}
+          wet={wet}
           mode={mode}
           calibration={calibration}
           initialPrefs={prefs}
-          onFinish={save}
+          resume={resume?.state ?? null}
+          onFinish={(r) => save(r, null)}
+          onPause={(r, st) => save(r, st)}
         />
       )}
 
@@ -161,15 +198,17 @@ export function ReaderApp({
               <>
                 <p className="font-medium">Couldn&apos;t save your session</p>
                 <p className="text-sm text-muted mt-1">{saveError}</p>
-                <button className="btn btn-primary mt-5" onClick={() => pendingReport.current && save(pendingReport.current)}>
+                <button className="btn btn-primary mt-5" onClick={() => pendingSave.current && save(pendingSave.current.report, pendingSave.current.state)}>
                   Try again
                 </button>
               </>
             ) : (
               <>
                 <div className="mx-auto h-8 w-8 rounded-full border-2 border-border border-t-accent animate-spin" />
-                <p className="font-medium mt-5">Building your report…</p>
-                <p className="text-sm text-muted mt-1">Summarizing anything you skipped. This takes a few seconds.</p>
+                <p className="font-medium mt-5">{pausing ? "Saving your place…" : "Building your report…"}</p>
+                <p className="text-sm text-muted mt-1">
+                  {pausing ? "Your progress is kept. Pick up right where you left off any time." : "Summarizing anything you skipped. This takes a few seconds."}
+                </p>
               </>
             )}
           </div>

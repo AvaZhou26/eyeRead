@@ -1,11 +1,13 @@
 import { redirect } from "next/navigation";
 import { getCurrentUser } from "@/lib/auth";
+import { demoUsers } from "@/lib/db";
 import { Logo } from "@/components/icons";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { LoginForm } from "./LoginForm";
 
 export default async function LoginPage() {
   if (await getCurrentUser()) redirect("/dashboard");
+  const demos = (await demoUsers()).map((u) => ({ id: u.id, name: u.name, role: u.role }));
   return (
     <div className="min-h-screen grid lg:grid-cols-2">
       <div className="hidden lg:flex flex-col justify-between p-12 bg-surface-2 border-r border-border">
@@ -20,7 +22,7 @@ export default async function LoginPage() {
             <li className="flex gap-3"><Dot c="var(--reread)" />Get AI summaries of anything you missed, with a quick check-in quiz.</li>
           </ul>
         </div>
-        <p className="text-xs text-faint">Hackathon demo. Video never leaves your browser.</p>
+        <p className="text-xs text-faint">Video never leaves your browser.</p>
       </div>
       <div className="flex flex-col">
         <div className="flex justify-between items-center p-5">
@@ -29,9 +31,7 @@ export default async function LoginPage() {
         </div>
         <div className="flex-1 flex items-center justify-center px-6 pb-16">
           <div className="w-full max-w-sm">
-            <h1 className="text-2xl font-semibold tracking-tight">Welcome</h1>
-            <p className="text-muted mt-1.5 mb-8 text-[15px]">Sign in with any name and email. This is a demo, so there are no passwords.</p>
-            <LoginForm />
+            <LoginForm demos={demos} />
           </div>
         </div>
       </div>

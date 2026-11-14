@@ -8,6 +8,8 @@ export interface User {
   email: string;
   role: Role;
   createdAt: string;
+  /** Demo accounts sign in with one click; real accounts need a password. */
+  demo?: boolean;
 }
 
 export interface Course {
@@ -35,7 +37,7 @@ export interface Reading {
   courseId: string | null; // null = a student's personal reading
   dueDate: string | null;
   instructions: string;
-  source: "paste" | "pdf" | "sample";
+  source: "paste" | "pdf" | "sample" | "image";
   createdAt: string;
 }
 
@@ -112,16 +114,51 @@ export interface AiResult {
   note?: string;
 }
 
+/**
+ * Everything needed to pick a paused session back up where it left off. Saved by the
+ * reader when a student presses Pause; the next "Start reading" restores it.
+ */
+export interface ResumeState {
+  version: 1;
+  elapsedSec: number; // session time so far (pauses not counted)
+  firstWord: number; // first word of the page they were on
+  wordDwell: number[]; // seconds per word (rounded)
+  wordRereads: number[];
+  segments: StateSegment[];
+  distractions: DistractionEvent[];
+  regressions: { from: number; to: number }[];
+  nudges: number;
+  pagesTurned: number;
+  totalSweeps: number;
+  calibrationQuality: SessionReport["calibrationQuality"];
+  calibrationErrorPx: number | null;
+}
+
+export type SessionStatus = "paused" | "done";
+
 export interface Session {
   id: string;
   readingId: string;
   userId: string;
   startedAt: string;
-  endedAt: string;
+  endedAt: string; // last time the session was saved (pause or finish)
+  status: SessionStatus;
+  /** How many sittings this session took (1 + number of resumes). */
+  sittings: number;
   report: SessionReport;
   ai: AiResult | null;
+  resume?: ResumeState | null;
   /** Student's own-words recall of each missed section (keyed by section index). */
   recall?: Record<string, { text: string; savedAt: string }>;
+}
+
+/** AI (or fallback) lesson plan for a reading, based on how the class read it. */
+export interface LessonPlan {
+  readingId: string;
+  text: string; // markdown-ish plain text
+  generatedBy: "gemini" | "fallback";
+  createdAt: string;
+  basedOnSessions: number;
 }
 
 export interface ClassDigest {

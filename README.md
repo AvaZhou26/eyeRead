@@ -49,7 +49,8 @@ To stop the app, click the terminal and press **Ctrl + C**.
 
 ## Test it as a student (about 5 minutes)
 
-1. On the sign-in page choose **Student**, type any name and email (e.g. `me@test.edu`) and press **Continue**. You're automatically enrolled in the demo course.
+1. On the sign-in page click **Create an account**, choose **Student**, and enter a name, email and password (8+ characters). Or click the **Sam Student** demo button (no password).
+   - New accounts start with no courses: click **Join a course** and type **READ01** (the demo course's join code).
 2. Under **Assigned readings**, click **How Your Eyes Actually Read**, then **Start reading**.
 3. Click **Turn on camera** and allow camera access when Chrome asks.
 4. Wait until all four checks are green (face visible, centered, distance, lighting). If lighting is red, face a lamp or window; don't sit with a window behind you.
@@ -70,7 +71,8 @@ To stop the app, click the terminal and press **Ctrl + C**.
 | Switch to another browser tab and come back | Counted as a distraction in your report. |
 | Gear icon (top right) | Change theme (light / dark / sepia), font, text size, turn reading aids off, or recalibrate. |
 
-7. Click **Finish & see report** on the last page, or **Finish session** at the top. After a few seconds you'll see:
+7. Need a break? Click **Pause** (top right). Your place and everything measured so far are saved. Back on the reading's page, **Continue reading** picks up on the same page, and the sittings add up to ONE report. (**Start over instead** begins a fresh session.)
+8. Click **Finish & see report** on the last page, or **Finish session** at the top. After a few seconds you'll see:
    - coverage, focus, reading speed and time
    - a paragraph-by-paragraph strip, and the full text colored by read / skimmed / skipped, with re-read paragraphs marked
    - **What you missed**: Gemini summaries of the skipped parts, plus a 3-question quiz on them
@@ -78,27 +80,40 @@ To stop the app, click the terminal and press **Ctrl + C**.
 
 ### Upload your own reading
 
-**Upload a reading** (top bar). Paste text, or switch to **Upload PDF** and drop a PDF. Check the extracted text, fix anything odd, then save. With a Gemini key you can tick *"Clean up messy formatting with Gemini"* for tricky PDFs (two columns, lots of headers).
+**Upload a reading** (top bar) has three tabs:
+- **Paste text**
+- **Upload PDF**: pulls out the text. A scanned/photocopied PDF (pages that are just pictures) is detected and read like photos.
+- **Photos or scans**: drop phone photos of pages (several at once; they're read in filename order). With a Gemini key, Gemini reads them; without one, the text is recognised on your laptop (the first time downloads a ~10 MB English model). Always skim the result and fix any mistakes before saving.
+
+With a Gemini key you can tick *"Clean up messy formatting with Gemini"* for tricky PDFs (two columns, lots of headers).
+
+### Your reading habits
+
+**Reading habits** (top bar) shows patterns across your sessions once you have a few: when you start skimming, whether focus fades in long sessions, whether you skip the ends of readings, and a weekly chart of minutes with your eyes on the page.
 
 ---
 
 ## Test it as a professor
 
 1. Sign out (the arrow icon at the top right).
-2. Sign in with role **Professor** and email **`prof@demo.edu`** (the demo professor who owns the demo course).
-3. Open **PSYC 214** to see the readings, the join code **READ01** and the student list.
-4. Click a reading to open **Class insights**: per-student results, a class reading map (which paragraphs many students skipped or re-read), and **Generate** for a Gemini-written class digest.
-5. **Post a reading** to assign something new (paste or PDF, optional due date and instructions).
-6. **New course** on the dashboard creates a course with its own join code. Students join from their dashboard with **Join a course**.
+2. Click the **Prof. Rivera** demo button, or create your own account as a **Teacher**.
+3. Your home page is **the courses you teach**. **New course** creates one with its own join code.
+4. Open a course to see its stats (students, share of readings finished, class reading time), the **readings with their due dates**, and the **students**.
+5. **Click a student** to see how they did on every reading: coverage, focus, eyes-on reading time, speed, sessions/sittings, late or overdue, plus their reading habits.
+6. **Click a reading** for its class report: per-student table, class reading map (which paragraphs many students skipped or re-read), a **Lesson plan** built around what the class struggled with and skipped, and a class digest. Without a Gemini key both are template versions built from the numbers.
+7. **Post a reading** to assign something new: paste text, upload a PDF, or upload photos/scans of photocopied pages; optional due date and instructions.
 
 ## Testing with other people
 
-- **Same laptop:** sign out, then sign in with a different email. Everyone gets their own reports, and the professor view combines them.
+- **Same laptop:** sign out, then create another account. Everyone gets their own reports, and the teacher view combines them.
 - **Their own laptop:** the camera only works on `localhost` or `https`. The easiest option is to run the app on their laptop (copy this folder and repeat steps 2–4). They'll have their own separate data.
 
-## Resetting the demo data
+## Where the data lives / resetting it
 
-Stop the app (Ctrl + C), delete the file `data/db.json`, and start it again. It recreates the demo professor, course and reading.
+Everything is in a SQLite database file, `data/read-assist.db` (accounts, courses, readings, sessions, lesson plans). Passwords are stored hashed.
+
+- **Reset:** stop the app (Ctrl + C), delete `data/read-assist.db` **and** `data/db.json`, and start it again. It recreates the demo teacher, demo student, course and reading.
+- `data/db.json` is the old storage format. If it's present when the database is first created, its contents are copied in, so earlier test data carried over. You can keep it as a backup.
 
 ## Troubleshooting
 
@@ -121,7 +136,7 @@ Stop the app (Ctrl + C), delete the file `data/db.json`, and start it again. It 
    - **Read:** at least 35% of normal reading time
    - **Skimmed:** 15–35%
    - **Skipped:** less than that
-   - **Re-read:** jumping back 2+ lines and staying there, or lingering much longer than your usual pace
+   - **Re-read:** jumping back 2+ lines and staying there, but only over lines you had already *read*. Going back to lines you skimmed or skipped just counts as reading them. Lingering much longer than your usual pace on a paragraph also counts.
 5. **Gentle aids.** The tracker never shows anything that moves with your eyes. The bookmark appears only when you look away or skip a block of lines, and fades on its own.
 
 Simulation check: `npm run simulate` feeds a fake reader with noisy, offset gaze through the real tracker. In recent runs, the estimated line was within ±1 of the true line 92–100% of the time, skipped blocks and look-aways were caught with the marker on the right line, and re-reading was detected in 4 of 5 runs.

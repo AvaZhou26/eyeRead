@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Read Assist — how much did I read?",
+  "version": "0.1.0",
+  "description": "Measures how much of an article you actually read: per-paragraph read / skimmed / skipped, on-device.",
+  "action": { "default_popup": "popup.html", "default_title": "Read Assist" },
+  "background": { "service_worker": "dist/background.js" },
+  "permissions": ["storage", "offscreen"],
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["dist/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}

@@ -12,11 +12,9 @@ export async function POST(req: Request) {
   if (file.size > 25 * 1024 * 1024) return Response.json({ error: "PDF is too large (25 MB max)." }, { status: 400 });
   try {
     const { text, pages } = await pdfToText(await file.arrayBuffer());
-    if (!text.trim())
-      return Response.json(
-        { error: "Couldn't find any text in that PDF. It may be a scanned image; try copying the text in instead." },
-        { status: 422 },
-      );
+    // A photocopy/scan has pages that are just pictures. The form then reads them as images.
+    if (text.replace(/\s+/g, "").length < 40 * Math.max(1, pages))
+      return Response.json({ scanned: true, pages });
     let finalText = text;
     let cleanedByAi = false;
     if (useAi) {

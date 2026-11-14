@@ -17,7 +17,9 @@ export function NewReadingForm({
   aiAvailable: boolean;
 }) {
   const router = useRouter();
-  const [mode, setMode] = useState<"paste" | "pdf">("paste");
+  const [mode, setMode] = useState<"paste" | "pdf" | "photo">("paste");
+  const [source, setSource] = useState<"paste" | "pdf" | "image">("paste");
+  const [progress, setProgress] = useState<{ msg: string; frac: number } | null>(null);
   const [title, setTitle] = useState("");
   const [text, setText] = useState("");
   const [courseId, setCourseId] = useState(defaultCourseId ?? "");
@@ -25,7 +27,7 @@ export function NewReadingForm({
   const [instructions, setInstructions] = useState("");
   const [useAi, setUseAi] = useState(false);
   const [pdfInfo, setPdfInfo] = useState("");
-  const [busy, setBusy] = useState<"" | "pdf" | "save">("");
+  const [busy, setBusy] = useState<"" | "pdf" | "ocr" | "save">("");
   const [error, setError] = useState("");
   const [dragging, setDragging] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -45,12 +47,70 @@ export function NewReadingForm({
     const res = await fetch("/api/pdf", { method: "POST", body: form });
     const data = await res.json();
     setBusy("");
+    if (res.ok && data.scanned) return readScans([file]); // photocopied pages: read them as images
     if (!res.ok) return setError(data.error ?? "Couldn't read that PDF.");
     setText(data.text);
+    setSource("pdf");
     if (!title) setTitle(data.title);
     setPdfInfo(
       `Extracted ${data.pages} page${data.pages === 1 ? "" : "s"}${data.cleanedByAi ? " (cleaned up with Gemini)" : ""}. Check the text below and fix anything that looks off.`,
     );
+  }
+
+  /** Photos or scanned pages → text. Gemini if available, otherwise on-device recognition. */
+  async function readScans(files: File[]) {
+    if (!files.length) return;
+    setBusy("ocr");
+    setError("");
+    setPdfInfo("");
+    setProgress({ msg: "Reading your pages…", frac: 0 });
+    try {
+      let result: string | null = null;
+      if (aiAvailable) {
+        const form = new FormData();
+        files.forEach((f) => form.append("file", f));
+        const res = await fetch("/api/ocr", { method: "POST", body: form });
+        const data = await res.json();
+        if (res.ok) result = data.text;
+        else if (data.error !== "no-ai") throw new Error(data.error);
+      }
+      if (result === null) {
+        const { pdfToImages, recognizeImages } = await import("@/lib/ocr");
+        const onProgress = (msg: string, frac: number) => setProgress({ msg, frac });
+        const images: Blob[] = [];
+        for (const f of files) {
+          if (f.type === "application/pdf") images.push(...(await pdfToImages(f, onProgress)));
+          else images.push(f);
+        }
+        result = await recognizeImages(images, onProgress);
+      }
+      if (!result.trim()) throw new Error("Couldn't find any text in those pages. Try a sharper, well-lit photo.");
+      setText(result);
+      setSource("image");
+      if (!title) setTitle(files[0].name.replace(/\.[a-z0-9]+$/i, "").replace(/[_-]+/g, " "));
+      setPdfInfo(
+        `Read ${files.length} file${files.length === 1 ? "" : "s"}${aiAvailable ? " with Gemini" : " on this device"}. Text recognition isn't perfect, so skim the text below and fix any mistakes.`,
+      );
+    } catch (err) {
+      console.error("[ocr]", err);
+      setError((err as Error).message || "Couldn't read those pages.");
+    } finally {
+      setBusy("");
+      setProgress(null);
+    }
+  }
+
+  function handleFiles(list: FileList | File[]) {
+    const files = Array.from(list);
+    if (!files.length) return;
+    if (mode === "pdf") {
+      if (files[0].type !== "application/pdf") return setError("That isn't a PDF. Use the Photos tab for pictures of pages.");
+      return uploadPdf(files[0]);
+    }
+    const bad = files.find((f) => !f.type.startsWith("image/") && f.type !== "application/pdf");
+    if (bad) return setError(`${bad.name} isn't an image or PDF.`);
+    // Pages in filename order (phones name photos IMG_0001, IMG_0002, …).
+    void readScans(files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })));
   }
 
   async function save(e: React.FormEvent) {
@@ -66,7 +126,7 @@ export function NewReadingForm({
         courseId: role === "professor" ? courseId || null : null,
         dueDate: dueDate || null,
         instructions,
-        source: mode,
+        source,
       }),
     });
     const data = await res.json();
@@ -86,20 +146,20 @@ export function NewReadingForm({
           <input id="title" className="input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Chapter 3: Memory and Attention" />
         </div>
 
-        <div className="inline-grid grid-cols-2 gap-1 p-1 rounded-xl bg-surface-2 border border-border">
-          {(["paste", "pdf"] as const).map((m) => (
+        <div className="inline-grid grid-cols-3 gap-1 p-1 rounded-xl bg-surface-2 border border-border">
+          {(["paste", "pdf", "photo"] as const).map((m) => (
             <button
               key={m}
               type="button"
               onClick={() => setMode(m)}
               className={`rounded-lg px-4 py-1.5 text-sm font-medium transition ${mode === m ? "bg-surface shadow-sm" : "text-muted hover:text-fg"}`}
             >
-              {m === "paste" ? "Paste text" : "Upload PDF"}
+              {m === "paste" ? "Paste text" : m === "pdf" ? "Upload PDF" : "Photos or scans"}
             </button>
           ))}
         </div>
 
-        {mode === "pdf" && (
+        {mode !== "paste" && (
           <div className="space-y-3">
             <div
               onDragOver={(e) => {
@@ -110,34 +170,50 @@ export function NewReadingForm({
               onDrop={(e) => {
                 e.preventDefault();
                 setDragging(false);
-                const f = e.dataTransfer.files[0];
-                if (f) uploadPdf(f);
+                if (busy === "") handleFiles(e.dataTransfer.files);
               }}
-              onClick={() => fileRef.current?.click()}
+              onClick={() => busy === "" && fileRef.current?.click()}
               className={`cursor-pointer rounded-xl border-2 border-dashed px-6 py-10 text-center transition ${
                 dragging ? "border-accent bg-accent-soft" : "border-border hover:border-accent"
               }`}
             >
               <IconUpload className="mx-auto text-muted" size={24} />
-              <div className="mt-2 font-medium">{busy === "pdf" ? "Reading your PDF…" : "Drop a PDF here, or click to choose"}</div>
-              <div className="text-sm text-muted mt-1">We pull out the text and reformat it for comfortable reading.</div>
+              <div className="mt-2 font-medium">
+                {busy === "pdf"
+                  ? "Reading your PDF…"
+                  : busy === "ocr"
+                    ? progress?.msg ?? "Reading your pages…"
+                    : mode === "pdf"
+                      ? "Drop a PDF here, or click to choose"
+                      : "Drop photos of pages (or a scanned PDF) here, or click to choose"}
+              </div>
+              <div className="text-sm text-muted mt-1">
+                {mode === "pdf"
+                  ? "We pull out the text and reformat it for comfortable reading. Scanned PDFs are read like photos."
+                  : "Photocopies and phone photos work. Choose several pages at once; they're read in filename order."}
+              </div>
+              {busy === "ocr" && progress && (
+                <div className="mx-auto mt-4 h-1.5 w-56 rounded-full bg-surface-2 overflow-hidden">
+                  <div className="h-full bg-accent transition-all duration-300" style={{ width: `${Math.round(progress.frac * 100)}%` }} />
+                </div>
+              )}
               <input
                 ref={fileRef}
                 type="file"
-                accept="application/pdf"
+                multiple={mode === "photo"}
+                accept={mode === "pdf" ? "application/pdf" : "image/*,application/pdf"}
                 className="hidden"
                 onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (f) uploadPdf(f);
+                  if (e.target.files) handleFiles(e.target.files);
                   e.target.value = "";
                 }}
               />
             </div>
-            <label className={`flex items-center gap-2 text-sm ${aiAvailable ? "" : "opacity-50"}`}>
+            {mode === "pdf" && <label className={`flex items-center gap-2 text-sm ${aiAvailable ? "" : "opacity-50"}`}>
               <input type="checkbox" disabled={!aiAvailable} checked={useAi} onChange={(e) => setUseAi(e.target.checked)} />
               Clean up messy formatting with Gemini (slower)
               {!aiAvailable && <span className="text-muted">· needs an API key</span>}
-            </label>
+            </label>}
             {pdfInfo && <p className="text-sm text-read">{pdfInfo}</p>}
           </div>
         )}

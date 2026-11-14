@@ -248,3 +248,104 @@ ${raw.slice(0, 120000)}`,
     return null;
   }
 }
+
+// ---------- Professor lesson plan ----------
+
+/**
+ * A lesson plan for the next class, built around what students struggled with or skipped.
+ * Without a Gemini key we still produce a useful plan from the numbers (a template).
+ */
+export async function generateLessonPlan(
+  reading: Reading,
+  studentCount: number,
+  aggregates: ClassParagraphAggregate[],
+  classStats: { avgCoverage: number | null; avgFocus: number | null; notStarted: number },
+): Promise<{ text: string; generatedBy: "gemini" | "fallback" }> {
+  const body = aggregates.filter((a) => !isHeading(a.text));
+  const struggled = [...body].filter((a) => a.avgRereads > 0 || a.avgDwellRatio > 1.4).sort((a, b) => b.avgRereads + b.avgDwellRatio - (a.avgRereads + a.avgDwellRatio)).slice(0, 3);
+  const skipped = [...body].filter((a) => a.skippedPct + a.skimmedPct / 2 >= 25).sort((a, b) => b.skippedPct - a.skippedPct).slice(0, 3);
+  const quote = (a: ClassParagraphAggregate) => `"${a.text.slice(0, 140).trim()}${a.text.length > 140 ? "…" : ""}"`;
+
+  if (!geminiConfigured()) {
+    const out: string[] = [];
+    out.push(`Lesson plan: ${reading.title}`);
+    out.push(
+      `Based on ${studentCount} student${studentCount === 1 ? "" : "s"}` +
+        (classStats.avgCoverage !== null ? ` · average coverage ${Math.round(classStats.avgCoverage)}%` : "") +
+        (classStats.notStarted > 0 ? ` · ${classStats.notStarted} haven't started` : "") +
+        ".",
+    );
+    out.push("");
+    out.push("1. Warm-up (5 min)");
+    out.push("Ask students to write the reading's main argument in one sentence, without notes. Collect a few and compare.");
+    out.push("");
+    out.push("2. Revisit the hardest passages (15 min)");
+    if (struggled.length)
+      struggled.forEach((a) => out.push(`• ¶${a.index + 1} ${quote(a)}: students went back over it ${a.avgRereads.toFixed(1)} times on average and spent ${a.avgDwellRatio.toFixed(1)}× the expected time. Walk through it together and ask what made it hard.`));
+    else out.push("• No passage stood out as hard. Pick the most central paragraph and have pairs paraphrase it.");
+    out.push("");
+    out.push("3. Cover what was skipped (10 min)");
+    if (skipped.length)
+      skipped.forEach((a) => out.push(`• ¶${a.index + 1} ${quote(a)}: skipped by ${Math.round(a.skippedPct)}%, skimmed by ${Math.round(a.skimmedPct)}%. Summarize it briefly or assign a small group to explain it.`));
+    else out.push("• Most of the class read the whole text. Use this time for discussion instead.");
+    out.push("");
+    out.push("4. Discussion and exit ticket (10 min)");
+    out.push("Pose one question that connects the hard passage to the skipped one. Close with a one-line exit ticket: \"What is still unclear?\"");
+    out.push("");
+    out.push("Add a GEMINI_API_KEY for a written plan with discussion questions tailored to the text.");
+    return { text: out.join("\n"), generatedBy: "fallback" };
+  }
+
+  const table = aggregates
+    .map(
+      (a) =>
+        `¶${a.index + 1} | skipped ${a.skippedPct.toFixed(0)}% | skimmed ${a.skimmedPct.toFixed(0)}% | re-reads/student ${a.avgRereads.toFixed(1)} | time vs expected ${a.avgDwellRatio.toFixed(2)}x | "${a.text.slice(0, 400)}"`,
+    )
+    .join("\n");
+  const prompt = `You are helping a college instructor plan the next class session on the assigned reading "${reading.title}".
+A webcam reading tracker measured how ${studentCount} students read it (approximate; speak in tendencies).
+Class averages: coverage ${classStats.avgCoverage === null ? "unknown" : Math.round(classStats.avgCoverage) + "%"}, focus ${classStats.avgFocus === null ? "unknown" : Math.round(classStats.avgFocus) + "%"}, ${classStats.notStarted} students have not started.
+
+Per-paragraph data:
+${table}
+
+Write a practical 45-50 minute lesson plan in plain text (no markdown symbols like # or **). Use numbered sections with times in parentheses, for example "1. Warm-up (5 min)". Include:
+- A short warm-up that checks comprehension of the main idea.
+- Focused work on the passages students struggled with (high re-reads or slow reading): say what those passages are about and give 2-3 specific discussion questions.
+- A plan for content most students skipped or skimmed (if any), e.g. a quick summary or a small-group task.
+- An exit ticket.
+Refer to paragraphs as "¶N". Keep it under 350 words.`;
+  try {
+    const out = await generateJson<{ plan: string }>(prompt, { type: "object", properties: { plan: { type: "string" } }, required: ["plan"] });
+    return { text: out.plan, generatedBy: "gemini" };
+  } catch (err) {
+    console.error("[gemini] lesson plan failed:", err);
+    return { text: `Couldn't reach Gemini (${(err as Error).message}).`, generatedBy: "fallback" };
+  }
+}
+
+// ---------- Photos / scans of pages → text ----------
+
+/** Transcribe photographed or scanned pages (images or an image-only PDF) with Gemini. */
+export async function transcribePages(files: { mimeType: string; data: Buffer }[]): Promise<string | null> {
+  const ai = client();
+  if (!ai) return null;
+  const res = await ai.models.generateContent({
+    model: MODEL,
+    contents: [
+      {
+        role: "user",
+        parts: [
+          ...files.map((f) => ({ inlineData: { mimeType: f.mimeType, data: f.data.toString("base64") } })),
+          {
+            text: `These are photos or scans of pages from a reading, in order. Transcribe the body text exactly, page after page.
+Join lines into paragraphs (fix line-break hyphenation), put a blank line between paragraphs, keep headings as their own short lines.
+Leave out page numbers, running headers/footers, and handwriting in the margins. Output only the text.`,
+          },
+        ],
+      },
+    ],
+    config: { temperature: 0 },
+  });
+  return res.text?.trim() || null;
+}

@@ -32,6 +32,13 @@ export function OverduePill() {
 export function StatusPill({ session, attempts }: { session: Session | null | undefined; attempts?: number }) {
   if (!session) return <span className="pill">Not started</span>;
   const pct = Math.round(session.report.coveragePct);
+  if (session.status === "paused")
+    return (
+      <span className="pill" style={{ color: "var(--accent)", background: "var(--accent-soft)" }} title="Paused partway; progress so far is saved">
+        <span className="h-1.5 w-1.5 rounded-full" style={{ background: "var(--accent)" }} />
+        Paused · {pct}%
+      </span>
+    );
   const color = pct >= FINISHED_PCT ? "var(--read)" : pct >= 50 ? "var(--skim)" : "var(--skip)";
   return (
     <span
@@ -77,6 +84,20 @@ export function Stat({ label, value, hint, color }: { label: string; value: Reac
         {value}
       </div>
       {hint && <div className="mt-0.5 text-xs text-muted">{hint}</div>}
+    </div>
+  );
+}
+
+/** One reading-habit insight (see readingHabits). */
+export function HabitCard({ title, detail, tone }: { title: string; detail: string; tone: "good" | "watch" | "neutral" }) {
+  const color = tone === "good" ? "var(--read)" : tone === "watch" ? "var(--skim)" : "var(--accent)";
+  return (
+    <div className="card p-5 flex gap-3">
+      <span className="mt-1.5 h-2 w-2 rounded-full shrink-0" style={{ background: color }} />
+      <div>
+        <div className="font-medium">{title}</div>
+        <p className="text-sm text-muted mt-1 leading-relaxed">{detail}</p>
+      </div>
     </div>
   );
 }

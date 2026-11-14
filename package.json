@@ -8,15 +8,20 @@
     "start": "next start",
     "lint": "eslint",
     "postinstall": "node scripts/setup-vision.mjs",
-    "simulate": "npx --yes tsx scripts/simulate.ts"
+    "simulate": "npx --yes tsx scripts/simulate.ts",
+    "prebuild": "node scripts/setup-vision.mjs"
   },
   "dependencies": {
     "@google/genai": "^3.3.0",
+    "@libsql/client": "^0.18.0",
     "@mediapipe/tasks-vision": "^1.2.3",
     "next": "16.4.6",
+    "pdfjs-dist": "^6.5.438",
     "react": "19.3.0",
     "react-dom": "19.3.0",
-    "unpdf": "^2.1.0"
+    "tesseract.js": "^7.0.0",
+    "unpdf": "^2.1.0",
+    "webeyetrack": "0.0.2"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "4.3.3",

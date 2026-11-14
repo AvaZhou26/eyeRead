@@ -11,7 +11,7 @@ export async function POST(req: Request) {
     courseId?: string | null;
     dueDate?: string | null;
     instructions?: string;
-    source?: "paste" | "pdf";
+    source?: "paste" | "pdf" | "image";
   };
   const paragraphs = toParagraphs(body.text ?? "");
   if (!body.title?.trim()) return Response.json({ error: "Give the reading a title." }, { status: 400 });
@@ -19,20 +19,20 @@ export async function POST(req: Request) {
 
   let courseId: string | null = null;
   if (body.courseId) {
-    const course = getCourse(body.courseId);
+    const course = await getCourse(body.courseId);
     if (!course || course.professorId !== user.id)
       return Response.json({ error: "Only the course's professor can post readings to it." }, { status: 403 });
     courseId = course.id;
   }
 
-  const reading = createReading({
+  const reading = await createReading({
     title: body.title.trim(),
     paragraphs,
     ownerId: user.id,
     courseId,
     dueDate: body.dueDate ? dueDateFromInput(body.dueDate) : null,
     instructions: body.instructions?.trim() ?? "",
-    source: body.source === "pdf" ? "pdf" : "paste",
+    source: body.source === "pdf" || body.source === "image" ? body.source : "paste",
   });
   return Response.json({ reading });
 }

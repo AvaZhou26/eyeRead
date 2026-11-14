@@ -102,7 +102,7 @@ export interface ValidationResult {
 }
 
 /** Compare predictions to known dot positions the user looked at. */
-export function validate(model: GazeModel, samples: CalibSample[], lineHeightPx: number): ValidationResult {
+export function validate(model: Pick<GazeModel, "predict">, samples: CalibSample[], lineHeightPx: number): ValidationResult {
   // Average predictions per dot first (that's what matters for reading, which is smoothed too).
   const byPoint = new Map<number, { gx: number; gy: number; n: number; x: number; y: number }>();
   for (const s of samples) {

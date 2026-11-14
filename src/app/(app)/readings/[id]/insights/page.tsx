@@ -1,28 +1,30 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireUser } from "@/lib/auth";
-import { getCourse, getDigest, getReading, sessionsForReading, studentsInCourse } from "@/lib/db";
+import { getCourse, getDigest, getLessonPlan, getReading, sessionsForReading, studentsInCourse } from "@/lib/db";
 import { aggregateParagraphs, attemptsPerStudent, bestPerStudent } from "@/lib/insights";
 import { formatDate, formatDuration, isHeading } from "@/lib/text";
 import { PageHeader } from "@/components/AppShell";
 import { EmptyState, Section, Stat, StatusPill } from "@/components/ui";
 import { DigestCard } from "@/components/report/DigestCard";
+import { LessonPlanCard } from "@/components/report/LessonPlanCard";
 
 export default async function InsightsPage({ params }: PageProps<"/readings/[id]/insights">) {
   const { id } = await params;
   const user = await requireUser();
-  const reading = getReading(id);
-  const course = reading?.courseId ? getCourse(reading.courseId) : null;
+  const reading = await getReading(id);
+  const course = reading?.courseId ? await getCourse(reading.courseId) : null;
   if (!reading || !course || course.professorId !== user.id) notFound();
 
-  const students = studentsInCourse(course.id);
+  const students = await studentsInCourse(course.id);
   // One session per student: their BEST attempt (highest coverage), so a short re-read
   // doesn't drag the class numbers down. All stats below are labelled accordingly.
-  const allSessions = sessionsForReading(reading.id);
+  const allSessions = await sessionsForReading(reading.id);
   const best = bestPerStudent(allSessions);
   const attempts = attemptsPerStudent(allSessions);
   const sessions = [...best.values()];
-  const digest = getDigest(reading.id);
+  const digest = await getDigest(reading.id);
+  const plan = await getLessonPlan(reading.id);
   const agg = aggregateParagraphs(reading, sessions);
   const avg = (f: (s: (typeof sessions)[number]) => number | null) => {
     const vals = sessions.map(f).filter((v): v is number => v !== null);
@@ -31,6 +33,7 @@ export default async function InsightsPage({ params }: PageProps<"/readings/[id]
   const avgCoverage = avg((s) => s.report.coveragePct);
   const avgFocus = avg((s) => s.report.focusPct);
   const avgWpm = avg((s) => s.report.avgWpm);
+  const avgEyesOn = avg((s) => s.report.activeSec);
   const maxRereads = Math.max(0.0001, ...agg.map((a) => a.avgRereads));
 
   return (
@@ -50,14 +53,21 @@ export default async function InsightsPage({ params }: PageProps<"/readings/[id]
         }
       />
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-8">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-8">
         <Stat label="Completed" value={`${best.size}/${students.length}`} hint={`students · ${allSessions.length} session${allSessions.length === 1 ? "" : "s"} total`} />
         <Stat label="Avg coverage" value={avgCoverage === null ? "–" : `${Math.round(avgCoverage)}%`} hint="best session per student" />
         <Stat label="Avg focus" value={avgFocus === null ? "–" : `${Math.round(avgFocus)}%`} hint="best session per student" />
+        <Stat label="Avg reading time" value={avgEyesOn === null ? "–" : formatDuration(avgEyesOn)} hint="eyes on the page" />
         <Stat label="Avg speed" value={avgWpm === null ? "–" : `${Math.round(avgWpm)}`} hint={avgWpm === null ? "best session per student" : "wpm · best session per student"} />
       </div>
 
-      <div className="mb-10">
+      <div className="mb-10 grid gap-4">
+        <LessonPlanCard
+          readingId={reading.id}
+          initial={plan}
+          hasSessions={sessions.length > 0}
+          newSessions={plan ? Math.max(0, sessions.length - plan.basedOnSessions) : 0}
+        />
         <DigestCard
           readingId={reading.id}
           initial={digest}
@@ -87,7 +97,7 @@ export default async function InsightsPage({ params }: PageProps<"/readings/[id]
                   <th className="font-medium px-3 py-3">Status</th>
                   <th className="font-medium px-3 py-3">Focus</th>
                   <th className="font-medium px-3 py-3">Speed</th>
-                  <th className="font-medium px-3 py-3">Time</th>
+                  <th className="font-medium px-3 py-3" title="Eyes on the page">Reading time</th>
                   <th className="font-medium px-3 py-3">Distractions</th>
                   <th className="font-medium px-3 py-3">Sessions</th>
                   <th className="font-medium px-5 py-3 text-right">Best session</th>
@@ -98,11 +108,13 @@ export default async function InsightsPage({ params }: PageProps<"/readings/[id]
                   const s = best.get(st.id) ?? null;
                   return (
                     <tr key={st.id} className="hover:bg-surface-2/60">
-                      <td className="px-5 py-3 font-medium">{st.name}</td>
+                      <td className="px-5 py-3 font-medium">
+                        <Link href={`/courses/${course.id}/students/${st.id}`} className="hover:text-accent">{st.name}</Link>
+                      </td>
                       <td className="px-3 py-3"><StatusPill session={s} /></td>
                       <td className="px-3 py-3 tabular-nums">{s ? `${Math.round(s.report.focusPct)}%` : "–"}</td>
                       <td className="px-3 py-3 tabular-nums">{s?.report.avgWpm ? `${s.report.avgWpm} wpm` : "–"}</td>
-                      <td className="px-3 py-3 tabular-nums">{s ? formatDuration(s.report.durationSec) : "–"}</td>
+                      <td className="px-3 py-3 tabular-nums">{s ? formatDuration(s.report.activeSec) : "–"}</td>
                       <td className="px-3 py-3 tabular-nums">{s ? s.report.distractions.length : "–"}</td>
                       <td className="px-3 py-3 tabular-nums">{attempts.get(st.id) ?? 0}</td>
                       <td className="px-5 py-3 text-right">

@@ -14,15 +14,15 @@ import { RecallBox } from "@/components/report/RecallBox";
 export default async function ReportPage({ params }: PageProps<"/reports/[id]">) {
   const { id } = await params;
   const user = await requireUser();
-  const session = getSession(id);
+  const session = await getSession(id);
   if (!session) notFound();
-  const reading = getReading(session.readingId);
+  const reading = await getReading(session.readingId);
   if (!reading) notFound();
-  const course = reading.courseId ? getCourse(reading.courseId) : null;
+  const course = reading.courseId ? await getCourse(reading.courseId) : null;
   const isOwner = session.userId === user.id;
   const isProf = course?.professorId === user.id;
   if (!isOwner && !isProf) notFound();
-  const student = getUser(session.userId);
+  const student = await getUser(session.userId);
 
   const r = session.report;
   const ai = session.ai;
@@ -38,7 +38,7 @@ export default async function ReportPage({ params }: PageProps<"/reports/[id]">)
   return (
     <div className="max-w-4xl">
       <PageHeader
-        eyebrow={`Session report · ${formatDate(session.endedAt)}${!isOwner && student ? ` · ${student.name}` : ""}`}
+        eyebrow={`${session.status === "paused" ? "In progress (paused)" : "Session report"} · ${formatDate(session.endedAt)}${session.sittings > 1 ? ` · ${session.sittings} sittings` : ""}${!isOwner && student ? ` · ${student.name}` : ""}`}
         title={reading.title}
         actions={
           isOwner && (

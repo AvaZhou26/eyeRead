@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Read Assist</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <strong>Read Assist</strong>
+    <nav>
+      <button class="tab active" data-view="article">This article</button>
+      <button class="tab" data-view="history">History</button>
+    </nav>
+  </header>
+
+  <main id="article">
+    <div id="empty" class="muted" hidden></div>
+    <section id="report" hidden>
+      <div class="title" id="title"></div>
+      <div class="site muted" id="site"></div>
+
+      <div class="big">
+        <div><span id="coverage">0</span><small>%</small><div class="label">read coverage</div></div>
+        <div class="times">
+          <div><b id="time">0:00</b> <span class="muted">reading time</span></div>
+          <div><b id="expected">0:00</b> <span class="muted">at 240 wpm</span></div>
+          <div id="eyeline" class="muted" hidden></div>
+        </div>
+      </div>
+
+      <div class="bar" id="bar"><i class="read"></i><i class="skim"></i><i class="skip"></i></div>
+      <div class="legend">
+        <span><i class="read"></i><span id="nread">0</span> read</span>
+        <span><i class="skim"></i><span id="nskim">0</span> skimmed</span>
+        <span><i class="skip"></i><span id="nskip">0</span> skipped</span>
+        <span class="muted">paragraphs</span>
+      </div>
+
+      <h3>Skipped sections</h3>
+      <ul id="skipped"></ul>
+
+      <div class="actions">
+        <button id="eye" class="primary">Start eye-tracked reading</button>
+        <button id="overlay">Show on page</button>
+        <button id="reset" class="ghost">Reset</button>
+      </div>
+      <p class="muted tiny" id="mode"></p>
+    </section>
+  </main>
+
+  <main id="history" hidden>
+    <ul id="hist"></ul>
+    <div class="actions"><button id="clear" class="ghost">Clear history</button></div>
+  </main>
+
+  <script src="dist/popup.js"></script>
+</body>
+</html>

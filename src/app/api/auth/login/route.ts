@@ -1,13 +1,13 @@
-import { cookies } from "next/headers";
-import { findOrCreateUser } from "@/lib/db";
-import { SESSION_COOKIE } from "@/lib/auth";
+import { checkPassword, startSession } from "@/lib/auth";
+import { getUserByEmail } from "@/lib/db";
 
 export async function POST(req: Request) {
-  const { name, email, role } = (await req.json()) as { name?: string; email?: string; role?: string };
-  if (!email || !/^\S+@\S+\.\S+$/.test(email)) return Response.json({ error: "Enter a valid email." }, { status: 400 });
-  if (role !== "student" && role !== "professor") return Response.json({ error: "Pick a role." }, { status: 400 });
-  const user = findOrCreateUser(name?.trim() || email.split("@")[0], email, role);
-  const store = await cookies();
-  store.set(SESSION_COOKIE, user.id, { httpOnly: true, sameSite: "lax", path: "/", maxAge: 60 * 60 * 24 * 30 });
-  return Response.json({ user });
+  const { email, password } = (await req.json()) as { email?: string; password?: string };
+  if (!email?.trim()) return Response.json({ error: "Enter your email." }, { status: 400 });
+  const user = await getUserByEmail(email);
+  // Demo accounts have no password and sign in from the demo buttons.
+  const ok = !!user && (user.passwordHash ? !!password && (await checkPassword(password, user.passwordHash)) : user.demo === true);
+  if (!user || !ok) return Response.json({ error: "Wrong email or password." }, { status: 401 });
+  await startSession(user.id);
+  return Response.json({ ok: true });
 }

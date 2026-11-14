@@ -13,12 +13,12 @@ function cell(v: string | number | null | undefined): string {
 export async function GET(req: Request, ctx: RouteContext<"/api/readings/[id]/export">) {
   const { id } = await ctx.params;
   const user = await getCurrentUser();
-  const reading = getReading(id);
-  const course = reading?.courseId ? getCourse(reading.courseId) : null;
+  const reading = await getReading(id);
+  const course = reading?.courseId ? await getCourse(reading.courseId) : null;
   if (!user || !reading || !course || course.professorId !== user.id)
     return Response.json({ error: "Not allowed." }, { status: 403 });
 
-  const all = sessionsForReading(reading.id);
+  const all = await sessionsForReading(reading.id);
   const best = bestPerStudent(all);
   const attempts = attemptsPerStudent(all);
   const origin = new URL(req.url).origin;
@@ -27,7 +27,7 @@ export async function GET(req: Request, ctx: RouteContext<"/api/readings/[id]/ex
     "Student", "Email", "Status", "Coverage %", "Focus %", "Speed (wpm)", "Time (s)", "Time",
     "Distractions", "Sessions", "Best session date", "Best session link",
   ];
-  const rows = studentsInCourse(course.id).map((st) => {
+  const rows = (await studentsInCourse(course.id)).map((st) => {
     const s = best.get(st.id);
     const r = s?.report;
     const mins = r ? `${Math.floor(r.durationSec / 60)}m ${r.durationSec % 60}s` : "";

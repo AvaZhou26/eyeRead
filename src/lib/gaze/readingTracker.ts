@@ -12,6 +12,7 @@ import type {
   DistractionEvent,
   ParagraphStat,
   ReadingState,
+  ResumeState,
   SessionReport,
   StateSegment,
 } from "../types";
@@ -82,7 +83,10 @@ export class ReadingTracker {
   private sweepTimes: number[] = [];
   private confHist: { t: number; line: number }[] = [];
   private pageMax = -1;
-  private regressCandidate: { line: number; since: number } | null = null;
+  // `snap` = how well each line on the page had been read when you jumped back. Only lines
+  // that were already properly READ count as re-read; going back to lines you skimmed or
+  // skipped is just reading them (their dwell keeps adding up and they turn "read").
+  private regressCandidate: { line: number; since: number; snap: number[] } | null = null;
   private regressionActive = false;
   private regressions: { from: number; to: number }[] = []; // word ranges re-read
 
@@ -401,13 +405,22 @@ export class ReadingTracker {
       if (likely > this.pageMax) this.pageMax = likely;
       if (this.pageMax >= 0 && likely <= this.pageMax - 2) {
         if (!this.regressCandidate || Math.abs(this.regressCandidate.line - likely) > 1)
-          this.regressCandidate = { line: likely, since: now };
+          this.regressCandidate = { line: likely, since: now, snap: lines.map((l) => this.lineRatio(l)) };
         else if (!this.regressionActive && now - this.regressCandidate.since >= 1.5) {
           this.regressionActive = true;
-          const from = lines[likely].firstWord;
-          const to = lines[Math.max(likely, this.pageMax - 1)].lastWord;
-          for (let w = from; w <= to; w++) this.wordRereads[w]++;
-          this.regressions.push({ from, to });
+          const snap = this.regressCandidate.snap;
+          // Contiguous runs of previously-read lines between where you went back to and where you were.
+          let run: { from: number; to: number } | null = null;
+          for (let i = likely; i <= Math.max(likely, this.pageMax - 1); i++) {
+            if ((snap[i] ?? 0) >= READ_RATIO) {
+              if (run) run.to = lines[i].lastWord;
+              else run = { from: lines[i].firstWord, to: lines[i].lastWord };
+            } else if (run) {
+              this.addRegression(run);
+              run = null;
+            }
+          }
+          if (run) this.addRegression(run);
         }
       } else {
         this.regressCandidate = null;
@@ -466,19 +479,72 @@ export class ReadingTracker {
     }
   }
 
+  private addRegression(r: { from: number; to: number }) {
+    for (let w = r.from; w <= r.to; w++) this.wordRereads[w]++;
+    this.regressions.push(r);
+  }
+
   dismissMarker() {
     this.setMarker(null);
   }
 
   // ---------- final report ----------
+  /** Segments and distractions so far, with the currently-open ones closed at time t (no mutation). */
+  private closed(t: number) {
+    const distractions = [...this.distractions];
+    if (this.openDistraction) {
+      const d = { ...this.openDistraction, durationSec: t - this.openDistraction.start };
+      if (d.durationSec >= 1) distractions.push(d);
+    }
+    const segments = [...this.segments];
+    if (t > this.segStart) segments.push({ state: this.state, start: this.segStart, end: t });
+    return { distractions, segments };
+  }
+
+  /** Session time so far, in seconds. */
+  elapsed(now: number) {
+    return now - this.t0;
+  }
+
+  /** Everything needed to continue this session later (see ResumeState). */
+  exportState(now: number, firstWord: number, calibration: { quality: SessionReport["calibrationQuality"]; errorPx: number | null }): ResumeState {
+    const t = now - this.t0;
+    const { distractions, segments } = this.closed(t);
+    return {
+      version: 1,
+      elapsedSec: t,
+      firstWord,
+      wordDwell: Array.from(this.wordDwell, (v) => Math.round(v * 1000) / 1000),
+      wordRereads: Array.from(this.wordRereads),
+      segments,
+      distractions,
+      regressions: [...this.regressions],
+      nudges: this.nudges,
+      pagesTurned: this.pagesTurned,
+      totalSweeps: this.totalSweeps,
+      calibrationQuality: calibration.quality,
+      calibrationErrorPx: calibration.errorPx,
+    };
+  }
+
+  /** Continue a paused session: the clock picks up at its old elapsed time. */
+  restore(s: ResumeState, now: number) {
+    if (s.wordDwell.length === this.wordDwell.length) this.wordDwell.set(s.wordDwell);
+    if (s.wordRereads.length === this.wordRereads.length) this.wordRereads.set(s.wordRereads);
+    this.segments = [...s.segments];
+    this.distractions = [...s.distractions];
+    this.regressions = [...s.regressions];
+    this.nudges = s.nudges;
+    this.pagesTurned = s.pagesTurned;
+    this.totalSweeps = s.totalSweeps;
+    this.t0 = now - s.elapsedSec;
+    this.segStart = s.elapsedSec;
+    this.lastT = null;
+  }
+
   buildReport(now: number, paragraphs: string[], calibration: { quality: SessionReport["calibrationQuality"]; errorPx: number | null }): SessionReport {
     const t = now - this.t0;
-    if (this.openDistraction) {
-      this.openDistraction.durationSec = t - this.openDistraction.start;
-      if (this.openDistraction.durationSec >= 1) this.distractions.push(this.openDistraction);
-      this.openDistraction = null;
-    }
-    if (t > this.segStart) this.segments.push({ state: this.state, start: this.segStart, end: t });
+    const { distractions, segments } = this.closed(t);
 
     const { totalWords, wordParagraph, paragraphWords } = this.opts;
     const wordStatus: CoverageStatus[] = new Array(totalWords);
@@ -536,13 +602,13 @@ export class ReadingTracker {
       if (p.rereads === 0 && p.status === "read" && p.words >= 8 && p.dwellSec / p.expectedSec >= Math.max(1, typical * 1.6)) p.rereads = 1;
     }
 
-    const distractedSec = this.distractions.reduce((s, d) => s + d.durationSec, 0);
+    const distractedSec = distractions.reduce((s, d) => s + d.durationSec, 0);
     const activeSec = Math.max(0, t - distractedSec);
     const avgWpm = readWords >= 30 && readDwell > 0 ? Math.round(Math.min(1200, Math.max(40, readWords / (readDwell / 60)))) : null;
 
     // merge tiny timeline segments for a clean chart
     const timeline: StateSegment[] = [];
-    for (const s of this.segments) {
+    for (const s of segments) {
       const last = timeline[timeline.length - 1];
       if (last && last.state === s.state) last.end = s.end;
       else if (s.end - s.start >= 0.3) timeline.push({ ...s });
@@ -560,7 +626,7 @@ export class ReadingTracker {
       calibrationErrorPx: calibration.errorPx,
       paragraphs: paraStats,
       wordStatus,
-      distractions: this.distractions.map((d) => ({ ...d, start: Math.round(d.start * 10) / 10, durationSec: Math.round(d.durationSec * 10) / 10 })),
+      distractions: distractions.map((d) => ({ ...d, start: Math.round(d.start * 10) / 10, durationSec: Math.round(d.durationSec * 10) / 10 })),
       timeline: timeline.map((s) => ({ ...s, start: Math.round(s.start * 10) / 10, end: Math.round(s.end * 10) / 10 })),
       nudges: this.nudges,
       pagesTurned: this.pagesTurned,

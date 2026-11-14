@@ -5,28 +5,41 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { FaceFrame, FaceTracker } from "@/lib/gaze/faceTracker";
 import { GazeModel, validate, type CalibSample, type ValidationResult } from "@/lib/gaze/gazeModel";
 import { OneEuroFilter } from "@/lib/gaze/oneEuro";
+import type { GazeEngine, GazeEstimator, WebEyeTrackSource, WetCalibSample } from "@/lib/gaze/webEyeTrackSource";
 
 export interface CalibrationResult {
-  model: GazeModel;
+  engine: GazeEngine;
+  estimator: GazeEstimator;
   validation: ValidationResult;
 }
 
-const CAL_POINTS: [number, number][] = [
+/** Ridge model as a frame → screen estimator. */
+function ridgeEstimator(model: GazeModel): GazeEstimator {
+  return { predict: (f) => (f.features ? model.predict(f.features) : null) };
+}
+
+/** Validation samples in WebEyeTrack mode already hold the predicted point as their "features". */
+const PREDICTED = { predict: (f: number[]) => ({ x: f[0], y: f[1] }) };
+
+export const CAL_POINTS: [number, number][] = [
   [50, 50], [6, 8], [50, 8], [94, 8], [94, 50], [94, 92], [50, 92], [6, 92], [6, 50],
   [28, 29], [72, 29], [72, 71], [28, 71],
 ];
-const VAL_POINTS: [number, number][] = [[50, 40], [24, 26], [76, 26], [76, 74], [24, 74]];
+export const VAL_POINTS: [number, number][] = [[50, 40], [24, 26], [76, 26], [76, 74], [24, 74]];
 
-type Phase = "intro" | "calibrate" | "validate" | "result";
+type Phase = "intro" | "calibrate" | "fitting" | "validate" | "result";
 
 export function Calibration({
   tracker,
+  wet,
   lineHeight,
   onDone,
   onCancel,
   onAttentionOnly,
 }: {
   tracker: FaceTracker;
+  /** When set, calibrate WebEyeTrack (its own few-shot adapt) instead of the ridge model. */
+  wet?: WebEyeTrackSource | null;
   lineHeight: number;
   onDone: (r: CalibrationResult) => void;
   onCancel?: () => void;
@@ -44,6 +57,8 @@ export function Calibration({
   const lastFaceAt = useRef(0);
   const calSamples = useRef<CalibSample[]>([]);
   const valSamples = useRef<CalibSample[]>([]);
+  const wetSamples = useRef<(WetCalibSample & { point: number })[]>([]);
+  const lastWetSeq = useRef(-1);
   const collectRef = useRef<{ until: number; from: number; point: number; x: number; y: number; into: CalibSample[] } | null>(null);
   const dotRef = useRef<HTMLDivElement>(null);
   const filterX = useRef(new OneEuroFilter(0.6, 0.004));
@@ -63,17 +78,30 @@ export function Calibration({
       if (f.face) lastFaceAt.current = f.t;
       const c = collectRef.current;
       if (c && f.features && f.t >= c.from && f.t <= c.until) {
-        c.into.push({ features: f.features, x: c.x, y: c.y, point: c.point });
+        if (!wet) c.into.push({ features: f.features, x: c.x, y: c.y, point: c.point });
+        else if (c.into === valSamples.current) {
+          // WebEyeTrack is already adapted by now: store its prediction.
+          const g = wet.estimator().predict(f);
+          if (g) c.into.push({ features: [g.x, g.y], x: c.x, y: c.y, point: c.point });
+        } else {
+          const l = wet.latest;
+          if (l && l.seq !== lastWetSeq.current && f.t - l.t < 0.2) {
+            lastWetSeq.current = l.seq;
+            c.into.push({ features: f.features, x: c.x, y: c.y, point: c.point });
+            const { eyePatch, headVector, faceOrigin3D } = l.out;
+            wetSamples.current.push({ eyePatch, headVector, faceOrigin3D, x: c.x, y: c.y, point: c.point });
+          }
+        }
       }
-      if (dotRef.current && result && f.features) {
-        const g = result.model.predict(f.features);
+      const g = dotRef.current && result ? result.estimator.predict(f) : null;
+      if (dotRef.current && g) {
         const x = filterX.current.filter(g.x, f.t);
         const y = filterY.current.filter(g.y, f.t);
         dotRef.current.style.transform = `translate(${x - 14}px, ${y - 14}px)`;
         dotRef.current.style.opacity = "1";
       }
     });
-  }, [tracker, result]);
+  }, [tracker, wet, result]);
 
   // Face-visible hint (polled; avoids re-rendering on every frame)
   useEffect(() => {
@@ -102,9 +130,25 @@ export function Calibration({
     setCollecting(true);
     const got = await collect(idx, pos(CAL_POINTS[idx]), 0.12, 0.85, calSamples.current);
     setCollecting(false);
-    if (got < 6) return; // face wasn't visible; let them click again
+    if (got < (wet ? 3 : 6)) return; // face wasn't visible; let them click again
     if (idx + 1 < CAL_POINTS.length) setIdx(idx + 1);
-    else {
+    else if (wet) {
+      // WebEyeTrack must be adapted before the validation dots, which use its live output.
+      setPhase("fitting");
+      try {
+        const byPoint = new Map<number, WetCalibSample[]>();
+        for (const s of wetSamples.current) byPoint.set(s.point, [...(byPoint.get(s.point) ?? []), s]);
+        // Up to 4 frames per dot: eye patches are large tensors, and adapt() trains on all of them.
+        const support = [...byPoint.values()].flatMap((ss) => pickEvenly(ss, 4));
+        wet.reset();
+        await wet.adapt(support);
+        setIdx(0);
+        setPhase("validate");
+      } catch (e) {
+        setError((e as Error).message);
+        setPhase("result");
+      }
+    } else {
       setPhase("validate");
       setIdx(0);
     }
@@ -121,13 +165,22 @@ export function Calibration({
       }
       if (cancelled) return;
       try {
+        if (wet) {
+          if (valSamples.current.length < 10) throw new Error("We couldn't see your eyes clearly enough.");
+          const validation = validate(PREDICTED, valSamples.current, lineHeight);
+          filterX.current.reset();
+          filterY.current.reset();
+          setResult({ engine: "webeyetrack", estimator: wet.estimator(), validation });
+          setPhase("result");
+          return;
+        }
         const model = GazeModel.fit(calSamples.current);
         const validation = validate(model, valSamples.current, lineHeight);
         // Final model also learns from the validation glances (more data = better).
         const finalModel = GazeModel.fit([...calSamples.current, ...valSamples.current], model.lambda);
         filterX.current.reset();
         filterY.current.reset();
-        setResult({ model: finalModel, validation });
+        setResult({ engine: "mediapipe", estimator: ridgeEstimator(finalModel), validation });
         setPhase("result");
       } catch (e) {
         setError((e as Error).message);
@@ -144,6 +197,7 @@ export function Calibration({
   function restart() {
     calSamples.current = [];
     valSamples.current = [];
+    wetSamples.current = [];
     setResult(null);
     setError("");
     setIdx(0);
@@ -181,6 +235,12 @@ export function Calibration({
           <Hint faceOk={faceOk}>Look at the dot, then click it · {idx + 1} of {CAL_POINTS.length}</Hint>
           <Dot at={pos(CAL_POINTS[idx])} onClick={clickDot} shrinking={collecting} clickable />
         </>
+      )}
+
+      {phase === "fitting" && (
+        <CenterCard>
+          <p className="text-muted">Tuning the eye tracker to you…</p>
+        </CenterCard>
       )}
 
       {phase === "validate" && size.w > 0 && (
@@ -308,4 +368,10 @@ function Dot({ at, onClick, shrinking, clickable }: { at: { x: number; y: number
       <span className="absolute h-1.5 w-1.5 rounded-full" style={{ background: "var(--accent-fg)" }} />
     </button>
   );
+}
+
+/** Evenly pick up to n items. */
+function pickEvenly<T>(xs: T[], n: number): T[] {
+  if (xs.length <= n) return xs;
+  return Array.from({ length: n }, (_, i) => xs[Math.floor(((i + 0.5) * xs.length) / n)]);
 }
