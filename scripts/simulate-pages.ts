@@ -74,7 +74,7 @@ function runOnce(gain: number, biasY: number): Result {
         const seenY = firstCentre + gain * (ty - firstCentre) + biasY + t * 0.3;
         const gx = tx + gauss() * NOISE, gy = seenY + gauss() * NOISE;
         const blink = Math.random() < 0.03;
-        const f: FaceFrame = { t, face: true, blink, features: blink ? null : [0], yaw: 0, pitch: 0, faceSize: 0.12, faceX: 0.5, faceY: 0.5, brightness: 120 };
+        const f: FaceFrame = { t, face: true, blink, features: blink ? null : [0], yaw: 0, pitch: 0, faceSize: 0.12, faceX: 0.5, faceY: 0.5, brightness: 120, eyePx: 30, eyes: null };
         let raw = -1;
         rt.onDebug = (d) => { raw = d.line ? d.line.index : -1; };
         rt.onFrame(f, blink ? null : { x: fx.filter(gx, t), y: fy.filter(gy, t) }, blink ? null : { x: qx.filter(gx, t), y: qy.filter(gy, t) }, t);

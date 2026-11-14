@@ -191,6 +191,7 @@ export class ReadingTracker {
     this.opts.alignedByReading = alignedByReading;
     this.hmm.sigmaY = sigmaY;
     this.hmm.biasY = biasY;
+    this.applyBiasLimits();
     // A new calibration has its own stretch: forget what we learned about the old one.
     this.hmm.gain = 1;
     this.gainObs = [];
@@ -376,8 +377,10 @@ export class ReadingTracker {
         if (onLine1.length >= 12) {
           const sorted = onLine1.sort((a, b) => a - b);
           const med = sorted[sorted.length >> 1];
-          const cap = Math.max(lineH * 4, this.opts.sigmaY * 2);
-          this.hmm.biasY = Math.max(-cap, Math.min(cap, med));
+          const cap = this.biasCap();
+          // Reading-aligned: the offset is already known, so only nudge it halfway.
+          const target = this.opts.alignedByReading ? this.hmm.biasY + 0.5 * (med - this.hmm.biasY) : med;
+          this.hmm.biasY = Math.max(-cap, Math.min(cap, target));
           this.pageAnchorRawY = (lines[0].top + lines[0].bottom) / 2 + med;
         }
         this.anchoring = false;

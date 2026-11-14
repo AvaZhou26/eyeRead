@@ -38,6 +38,15 @@ export class LineHmm {
   p: Float64Array = new Float64Array(1);
   biasY = 0;
   /**
+   * Limits on the drift correction. Defaults (null / BIAS_TAU) suit a dot-only calibration,
+   * where this offset is the main fix for a misaligned calibration. After the reading
+   * calibration the offset is already right, so the reader tightens these: a free offset can
+   * lock onto a wrong line (it's learned against the line it currently believes, which it
+   * picked using that same offset), and a big one makes things worse, not better.
+   */
+  biasCap: number | null = null;
+  biasTau = BIAS_TAU;
+  /**
    * Vertical stretch of the gaze relative to the page (1 = none). A webcam calibration is
    * often right near the top of the page but squashed or stretched further down; a single
    * offset (biasY) can't fix that. Measured across the first line, which is where biasY is
@@ -182,7 +191,7 @@ export class LineHmm {
     if (b.index < 0 || b.prob < BIAS_MIN_PROB) return;
     const L = this.lines[b.index];
     const resid = obs.y - (this.seenY((L.top + L.bottom) / 2) - this.biasY);
-    const alpha = Math.min(1, dt / BIAS_TAU);
+    const alpha = Math.min(1, dt / this.biasTau);
     this.biasY += alpha * (resid - this.biasY);
     const cap = this.biasCap ?? Math.max(lineHeight * 3, this.sigmaY * 1.5);
     this.biasY = Math.max(-cap, Math.min(cap, this.biasY));

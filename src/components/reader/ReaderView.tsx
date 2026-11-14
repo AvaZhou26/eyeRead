@@ -24,7 +24,7 @@ export interface ReaderPrefs {
 }
 const DEFAULT_PREFS: ReaderPrefs = { font: "serif", size: "m", aids: true, showGaze: false };
 const FONT_PX = { s: 18, m: 20, l: 23 };
-const FONT_VAR = { serif: "var(--font-reader-serif)", sans: "var(--font-ui)", hyper: "var(--font-reader-hyper)" };
+export const FONT_VAR = { serif: "var(--font-reader-serif)", sans: "var(--font-ui)", hyper: "var(--font-reader-hyper)" };
 // Generous spacing = lines farther apart = easier to tell apart by gaze. A webcam is only
 // accurate to about a centimetre on screen, so every extra pixel between lines helps.
 const LINE_HEIGHT = 2.5;
@@ -274,7 +274,9 @@ export function ReaderView({
       if (debugRef.current) {
         debugRef.current.textContent =
           `state ${d.state} · line ${d.line ? d.line.index : "-"} (${Math.round(d.lineProb * 100)}%) · off ${Math.round(d.offProb * 100)}%` +
-          ` · bias ${Math.round(d.biasY)}px · stretch ${d.gain.toFixed(2)} · sweeps/20s ${d.sweeps} · ${Math.round(d.fps)} fps${d.face ? "" : " · no face"}`;
+          ` · bias ${Math.round(d.biasY)}px · stretch ${d.gain.toFixed(2)} · sweeps/20s ${d.sweeps} · ${Math.round(d.fps)} fps${d.face ? "" : " · no face"}` +
+          // Reading-calibration correction (corrected y = a·y + b): with "bias", tells where an offset comes from.
+          (calibRef.current?.readingFit ? ` · readfit ${axisLabel("y", calibRef.current.readingFit)} ${calibRef.current.readingFit.x ? axisLabel("x", calibRef.current.readingFit.x) : "x –"}` : " · no readfit");
       }
     };
     if (resume) rt.restore(resume, performance.now() / 1000);
