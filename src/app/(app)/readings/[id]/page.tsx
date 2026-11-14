@@ -100,7 +100,7 @@ export default async function ReadingPage({ params, searchParams }: PageProps<"/
             <h2 className="text-lg font-semibold">Start a reading session</h2>
             <p className="text-muted mt-1 text-[15px]">
               Takes about 30 seconds to set up. Your camera is processed on this device only, and no video is ever uploaded.
-              Long reading? Press <b className="text-fg">Pause</b> any time to save your place.
+              Long reading? Press <b className="text-fg">Save &amp; exit</b> any time to save your place and come back later.
             </p>
             <ul className="mt-5 grid sm:grid-cols-3 gap-3 text-sm">
               <Tip icon={<IconSun size={16} />} text="Sit facing a light, not with a window behind you" />

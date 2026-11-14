@@ -5,40 +5,21 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { FaceFrame, FaceTracker } from "@/lib/gaze/faceTracker";
 import { GazeModel, validate, type CalibSample, type ValidationResult } from "@/lib/gaze/gazeModel";
 import { OneEuroFilter } from "@/lib/gaze/oneEuro";
-import type { ReadingFit } from "@/lib/gaze/readingCalibration";
-import { gazeEngine, WET_MAX_AGE_S, type GazeEngine, type GazeEstimator, type WebEyeTrackSource, type WetCalibSample } from "@/lib/gaze/webEyeTrackSource";
+import { currentDpr, modelEstimator } from "@/lib/gaze/savedCalibration";
+import { joinDevGazeLog, roundFeatures, type DevGazeLog } from "@/lib/gaze/devLog";
+import { WET_MAX_AGE_S, type GazeEngine, type GazeEstimator, type WebEyeTrackSource, type WetCalibSample } from "@/lib/gaze/webEyeTrackSource";
 
 export interface CalibrationResult {
   engine: GazeEngine;
   estimator: GazeEstimator;
   validation: ValidationResult;
-  /** From the reading step (ReadingCalibration), when it was done and could follow the lines. */
-  readingFit?: ReadingFit;
   /** The student's own reading pace from the reading step (seconds per word). */
   secPerWord?: number;
+  /** The fitted model (default engine only), so the calibration can be saved to the account. */
+  model?: GazeModel;
+  /** Browser zoom (devicePixelRatio) the model was fitted at; estimates are rescaled from it. */
+  dpr?: number;
 }
-
-/** Ridge model as a frame → screen estimator. */
-function ridgeEstimator(model: GazeModel): GazeEstimator {
-  return { predict: (f) => (f.features ? model.predict(f.features) : null) };
-}
-
-/**
- * Hybrid: the usual eye features plus WebEyeTrack's raw (never adapted) output as two more.
- * Whenever WebEyeTrack has no fresh result for a frame, the plain model answers instead.
- */
-function hybridEstimator(hybrid: GazeModel, plain: GazeModel, wet: WebEyeTrackSource): GazeEstimator {
-  return {
-    predict: (f) => {
-      if (!f.features) return null;
-      const n = wet.normFor(f);
-      return n ? hybrid.predict([...f.features, n[0], n[1]]) : plain.predict(f.features);
-    },
-  };
-}
-
-/** One number for "how good is this for telling lines apart" (vertical error + scatter, px). */
-const verticalScore = (v: ValidationResult) => v.meanAbsDyPx + (v.jitterDyPx ?? 0);
 
 /** Validation samples in WebEyeTrack mode already hold the predicted point as their "features". */
 const PREDICTED = { predict: (f: number[]) => ({ x: f[0], y: f[1] }) };
@@ -60,11 +41,7 @@ export function Calibration({
   onAttentionOnly,
 }: {
   tracker: FaceTracker;
-  /**
-   * WebEyeTrack, when the engine needs it. "webeyetrack": calibrate it with its own few-shot
-   * adapt instead of the ridge model. "hybrid": leave it unadapted and feed its raw output
-   * into the ridge model as extra features.
-   */
+  /** When set, calibrate WebEyeTrack (its own few-shot adapt) instead of the ridge model. */
   wet?: WebEyeTrackSource | null;
   lineHeight: number;
   onDone: (r: CalibrationResult) => void;
@@ -82,16 +59,21 @@ export function Calibration({
   const [size, setSize] = useState({ w: 0, h: 0 });
 
   const latest = useRef<FaceFrame | null>(null);
+  // Development only: calibration samples and result-screen gaze, for diagnosing the model.
+  const devLog = useRef<DevGazeLog | null>(null);
+  useEffect(() => {
+    const { log, leave } = joinDevGazeLog();
+    devLog.current = log;
+    log?.push({ k: "calstart", at: new Date().toISOString(), viewport: { w: window.innerWidth, h: window.innerHeight }, engine: wet ? "webeyetrack" : "mediapipe" });
+    return () => {
+      leave();
+      devLog.current = null;
+    };
+  }, [wet]);
   const lastFaceAt = useRef(0);
   const calSamples = useRef<CalibSample[]>([]);
   const valSamples = useRef<CalibSample[]>([]);
   const wetSamples = useRef<(WetCalibSample & { point: number })[]>([]);
-  // Hybrid engine: the same moments as calSamples / valSamples, with WebEyeTrack's two numbers added.
-  const hybCal = useRef<CalibSample[]>([]);
-  const hybVal = useRef<CalibSample[]>([]);
-  const hybrid = !!wet && gazeEngine() === "hybrid";
-  /** WebEyeTrack calibrated its own way (the "webeyetrack" engine). */
-  const wetAdapt = !!wet && !hybrid;
   const lastWetSeq = useRef(-1);
   const collectRef = useRef<{ until: number; from: number; point: number; x: number; y: number; into: CalibSample[] } | null>(null);
   const dotRef = useRef<HTMLDivElement>(null);
@@ -112,11 +94,9 @@ export function Calibration({
       if (f.face) lastFaceAt.current = f.t;
       const c = collectRef.current;
       if (c && f.features && f.t >= c.from && f.t <= c.until) {
-        if (!wet || !wetAdapt) {
-          c.into.push({ features: f.features, x: c.x, y: c.y, point: c.point });
-          const n = hybrid ? wet!.normFor(f) : null;
-          if (n) (c.into === valSamples.current ? hybVal : hybCal).current.push({ features: [...f.features, n[0], n[1]], x: c.x, y: c.y, point: c.point });
-        } else if (c.into === valSamples.current) {
+        devLog.current?.push({ k: c.into === valSamples.current ? "val" : "cal", point: c.point, x: Math.round(c.x), y: Math.round(c.y), feat: roundFeatures(f.features) });
+        if (!wet) c.into.push({ features: f.features, x: c.x, y: c.y, point: c.point });
+        else if (c.into === valSamples.current) {
           // WebEyeTrack is already adapted by now: store its prediction.
           const g = wet.estimator().predict(f);
           if (g) c.into.push({ features: [g.x, g.y], x: c.x, y: c.y, point: c.point });
@@ -133,6 +113,7 @@ export function Calibration({
         }
       }
       const g = dotRef.current && result ? result.estimator.predict(f) : null;
+      if (g) devLog.current?.push({ k: "res", t: Math.round(f.t * 1000) / 1000, raw: { x: Math.round(g.x), y: Math.round(g.y) }, feat: roundFeatures(f.features) });
       if (dotRef.current && g) {
         const x = filterX.current.filter(g.x, f.t);
         const y = filterY.current.filter(g.y, f.t);
@@ -140,7 +121,7 @@ export function Calibration({
         dotRef.current.style.opacity = "1";
       }
     });
-  }, [tracker, wet, wetAdapt, hybrid, result]);
+  }, [tracker, wet, result]);
 
   // Face-visible hint (polled; avoids re-rendering on every frame)
   useEffect(() => {
@@ -170,7 +151,7 @@ export function Calibration({
     setDotMsg("");
     const got = await collect(idx, pos(CAL_POINTS[idx]), 0.12, 0.85, calSamples.current);
     setCollecting(false);
-    if (got < (wetAdapt ? 3 : 6)) {
+    if (got < (wet ? 3 : 6)) {
       // Not enough frames for this dot: say why instead of silently staying on it.
       const faceNow = performance.now() / 1000 - lastFaceAt.current < 0.6;
       setDotMsg(
@@ -184,7 +165,7 @@ export function Calibration({
     }
     setDotMsg("");
     if (idx + 1 < CAL_POINTS.length) setIdx(idx + 1);
-    else if (wetAdapt && wet) {
+    else if (wet) {
       // WebEyeTrack must be adapted before the validation dots, which use its live output.
       setPhase("fitting");
       try {
@@ -222,7 +203,7 @@ export function Calibration({
       }
       if (cancelled) return;
       try {
-        if (wetAdapt && wet) {
+        if (wet) {
           if (valSamples.current.length < 10) throw new Error("We couldn't see your eyes clearly enough.");
           const validation = validate(PREDICTED, valSamples.current, lineHeight);
           filterX.current.reset();
@@ -237,25 +218,8 @@ export function Calibration({
         const finalModel = GazeModel.fit([...calSamples.current, ...valSamples.current], model.lambda);
         filterX.current.reset();
         filterY.current.reset();
-        // Hybrid: only if WebEyeTrack kept up for most of the samples AND the hybrid model does
-        // at least as well vertically on the validation dots as the plain one. Otherwise the
-        // extra signal isn't helping this person on this screen, and plain is the safer choice.
-        if (hybrid && wet && hybCal.current.length >= 0.6 * calSamples.current.length && hybVal.current.length >= 10) {
-          try {
-            const hModel = GazeModel.fit(hybCal.current);
-            const hValidation = validate(hModel, hybVal.current, lineHeight);
-            if (verticalScore(hValidation) <= verticalScore(validation) * 1.05) {
-              const hFinal = GazeModel.fit([...hybCal.current, ...hybVal.current], hModel.lambda);
-              setResult({ engine: "hybrid", estimator: hybridEstimator(hFinal, finalModel, wet), validation: hValidation });
-              setPhase("result");
-              return;
-            }
-            console.info("[gaze] hybrid was no better than plain on the validation dots; using plain", { hybrid: hValidation, plain: validation });
-          } catch (e) {
-            console.warn("[gaze] hybrid fit failed; using plain", e);
-          }
-        }
-        setResult({ engine: "mediapipe", estimator: ridgeEstimator(finalModel), validation });
+        const dpr = currentDpr();
+        setResult({ engine: "mediapipe", estimator: modelEstimator(finalModel, dpr), validation, model: finalModel, dpr });
         setPhase("result");
       } catch (e) {
         setError((e as Error).message);
@@ -273,8 +237,6 @@ export function Calibration({
     calSamples.current = [];
     valSamples.current = [];
     wetSamples.current = [];
-    hybCal.current = [];
-    hybVal.current = [];
     setResult(null);
     setError("");
     setIdx(0);

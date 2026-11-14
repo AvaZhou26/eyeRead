@@ -39,6 +39,8 @@ export function Setup({
   onStartCamera,
   onCalibrate,
   onSkipTracking,
+  savedCalibrationAt = null,
+  onUseSaved,
   title,
   backHref,
   resuming = false,
@@ -49,6 +51,10 @@ export function Setup({
   onStartCamera: () => void;
   onCalibrate: () => void;
   onSkipTracking: (mode: "attention" | "none") => void;
+  /** When the student's saved calibration (usable on this screen) was made; null = none. */
+  savedCalibrationAt?: string | null;
+  /** Start reading with the saved calibration. */
+  onUseSaved?: () => void;
   title: string;
   backHref: string;
   resuming?: boolean;
@@ -207,16 +213,33 @@ export function Setup({
               <CheckRow state={cameraState === "on" ? checks.light : "wait"} text={lightText} />
               <CheckRow state={cameraState === "on" ? checks.glare : "wait"} text={glareText} />
             </ul>
-            <button className="btn btn-primary w-full !py-2.5" disabled={cameraState !== "on" || !ready} onClick={onCalibrate}>
-              Calibrate &amp; start
-            </button>
+            {savedCalibrationAt && onUseSaved ? (
+              <div className="space-y-2">
+                <div className="flex gap-2">
+                  <button className="btn btn-primary flex-1 !py-2.5" disabled={cameraState !== "on" || !ready} onClick={onUseSaved}>
+                    Start reading
+                  </button>
+                  <button className="btn btn-ghost !py-2.5" disabled={cameraState !== "on" || !ready} onClick={onCalibrate}>
+                    Recalibrate
+                  </button>
+                </div>
+                <p className="text-xs text-muted leading-relaxed">
+                  Using your calibration from {new Date(savedCalibrationAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}. Recalibrate if
+                  you&apos;ve moved your screen or camera, or the tracking feels off.
+                </p>
+              </div>
+            ) : (
+              <button className="btn btn-primary w-full !py-2.5" disabled={cameraState !== "on" || !ready} onClick={onCalibrate}>
+                Calibrate &amp; start
+              </button>
+            )}
             {cameraState === "on" && !ready && (
               <p className="text-xs font-medium text-skip" role="status">
-                {checks.face !== "ok" ? "We need to see your face" : "It's too dark"} before calibrating. Fix the red check above.
+                {checks.face !== "ok" ? "We need to see your face" : "It's too dark"} before {savedCalibrationAt ? "starting" : "calibrating"}. Fix the red check above.
               </p>
             )}
             <p className="text-xs text-muted leading-relaxed">
-              We&apos;ll switch to full screen so the page doesn&apos;t move. Press Esc any time to leave full screen.
+              Reading happens in full screen: the eye tracker is calibrated to it. If you leave full screen (Esc), reading pauses until you return.
             </p>
             <div className="pt-2 border-t border-border">
               <button

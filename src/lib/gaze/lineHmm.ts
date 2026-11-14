@@ -23,9 +23,22 @@ export interface LineBox {
 
 /** Roughly how many seconds of webcam gaze make one independent observation. */
 const EVIDENCE_SEC = 0.35;
-/** Bias learning: time constant (s) and how sure we must be about the line. */
+/** Bias learning: default time constant (s). */
 const BIAS_TAU = 4;
-const BIAS_MIN_PROB = 0.6;
+/**
+ * Noise of a jump's measured vertical size, relative to sigmaY. The jump is the difference of
+ * two short averages of lightly smoothed gaze, so it is noisier than one line's position
+ * estimate is per second, yet much less noisy than a single frame. Tuned in
+ * scripts/simulate-reread.ts.
+ */
+const JUMP_DY_SIGMA = 0.6;
+const JUMP_DY_SCALE = 0.65;
+/** Where a big leftward jump lands, before its dy is weighed (see predict()). Sums to 1. */
+const JUMP_NEXT = 0.65;
+const JUMP_SAME = 0.15;
+const JUMP_BACK = 0.15;
+const JUMP_SKIP = 0.05;
+const JUMP_OFF = 1 - JUMP_NEXT - JUMP_SAME - JUMP_BACK - JUMP_SKIP;
 
 export interface HmmObservation {
   x: number;
@@ -37,15 +50,8 @@ export class LineHmm {
   /** posterior over [line 0..N-1, OFF] */
   p: Float64Array = new Float64Array(1);
   biasY = 0;
-  /**
-   * Limits on the drift correction. Defaults (null / BIAS_TAU) suit a dot-only calibration,
-   * where this offset is the main fix for a misaligned calibration. After the reading
-   * calibration the offset is already right, so the reader tightens these: a free offset can
-   * lock onto a wrong line (it's learned against the line it currently believes, which it
-   * picked using that same offset), and a big one makes things worse, not better.
-   */
-  biasCap: number | null = null;
-  biasTau = BIAS_TAU;
+  /** Time constant (s) of the offset learning (see learnBias). */
+  readonly biasTau = BIAS_TAU;
   /**
    * Vertical stretch of the gaze relative to the page (1 = none). A webcam calibration is
    * often right near the top of the page but squashed or stretched further down; a single
@@ -99,26 +105,65 @@ export class LineHmm {
     return this.gainRef + (rawY - this.biasY - this.gainRef) / this.gain;
   }
 
-  /** Advance time by dt seconds. `sweep` = a return sweep was just detected. */
-  predict(dt: number, sweep: boolean) {
+  /**
+   * Advance time by dt seconds. `jump` = a big leftward jump of the gaze was just detected:
+   * usually the return sweep to the next line, but it may also be a hop back within the line
+   * or a jump back to re-read. When its vertical size `dy` (raw px) is known, it is evidence
+   * for where it landed: each move i → j is weighted by how well `dy` matches the distance
+   * between those lines. Normalising over all moves together (not per starting line) also
+   * lets the jump tell us about the line it started from.
+   */
+  predict(dt: number, jump: boolean | { dy: number }) {
     const n = this.lines.length;
     if (n === 0) return;
     const rate = (r: number) => 1 - Math.exp(-r * dt);
     const next = new Float64Array(n + 1);
+    const dy = typeof jump === "object" ? jump.dy : null;
+    const sJ = this.sigmaY * JUMP_DY_SIGMA;
+    const centre = (i: number) => (this.lines[i].top + this.lines[i].bottom) / 2;
+    // Likelihood of the jump's dy for a move i → j (1 when dy is unknown or no jump).
+    const fit = (i: number, j: number) => (dy === null ? 1 : Math.exp(-0.5 * ((dy - JUMP_DY_SCALE * this.gain * (centre(j) - centre(i))) / sJ) ** 2));
+    const offFit = dy === null ? 1 : Math.exp(-0.5 * 2.6 * 2.6);
 
-    let pNext: number, pPrev: number, pJump: number, pOff: number;
-    if (sweep) {
-      pNext = 0.72;
-      pPrev = 0.03;
-      pJump = 0.05;
-      pOff = 0.02;
+    if (jump) {
+      // Where a big leftward jump lands: usually the next line; sometimes a hop back within the
+      // line, a jump back to re-read (nearer lines likelier) or a skip ahead. The backward share
+      // must be real: if it is tiny, no measured dy can make the model believe a jump back.
+      for (let i = 0; i < n; i++) {
+        const m = this.p[i];
+        if (m === 0) continue;
+        let same = JUMP_SAME;
+        if (i + 1 < n) next[i + 1] += m * JUMP_NEXT * fit(i, i + 1);
+        else same += JUMP_NEXT;
+        if (i > 0) {
+          let h = 0;
+          for (let k = 1; k <= i; k++) h += 1 / k;
+          for (let k = 1; k <= i; k++) next[i - k] += (m * JUMP_BACK * fit(i, i - k)) / k / h;
+        } else same += JUMP_BACK;
+        if (i + 2 < n) {
+          let wsum = 0;
+          for (let j = i + 2; j < n; j++) wsum += 1 / Math.sqrt(1 + j - i);
+          for (let j = i + 2; j < n; j++) next[j] += (m * JUMP_SKIP * fit(i, j)) / Math.sqrt(1 + j - i) / wsum;
+        } else same += JUMP_SKIP;
+        next[n] += m * JUMP_OFF * offFit;
+        next[i] += m * same * fit(i, i);
+      }
     } else {
-      pNext = rate(0.1);
-      pPrev = rate(0.04);
-      pJump = rate(0.2);
-      pOff = rate(0.15);
+      const pNext = rate(0.1), pPrev = rate(0.04), pJump = rate(0.2), pOff = rate(0.15);
+      this.wander(next, pNext, pPrev, pJump, pOff);
     }
+    // From OFF you come back to any line (the gaze decides which).
+    const off = this.p[n];
+    const back = rate(1.5);
+    for (let j = 0; j < n; j++) next[j] += (off * back) / n;
+    next[n] += off * (1 - back);
+    this.p = next;
+    this.normalize();
+  }
 
+  /** Between jumps: mostly stay; occasionally move a line, jump anywhere, or leave the text. */
+  private wander(next: Float64Array, pNext: number, pPrev: number, pJump: number, pOff: number) {
+    const n = this.lines.length;
     for (let i = 0; i < n; i++) {
       const m = this.p[i];
       if (m === 0) continue;
@@ -135,13 +180,6 @@ export class LineHmm {
       next[n] += m * pOff;
       next[i] += m * stay;
     }
-    // From OFF you come back to any line (the gaze decides which).
-    const off = this.p[n];
-    const back = rate(1.5);
-    for (let j = 0; j < n; j++) next[j] += (off * back) / n;
-    next[n] += off * (1 - back);
-    this.p = next;
-    this.normalize();
   }
 
   /**
@@ -185,16 +223,19 @@ export class LineHmm {
     this.p[Math.max(0, Math.min(this.lines.length - 1, index))] = 1;
   }
 
-  /** Slowly learn a vertical offset from confident moments (corrects calibration drift). */
-  adaptBias(obs: HmmObservation, dt: number, lineHeight: number) {
-    const b = this.best();
-    if (b.index < 0 || b.prob < BIAS_MIN_PROB) return;
-    const L = this.lines[b.index];
-    const resid = obs.y - (this.seenY((L.top + L.bottom) / 2) - this.biasY);
-    const alpha = Math.min(1, dt / this.biasTau);
-    this.biasY += alpha * (resid - this.biasY);
-    const cap = this.biasCap ?? Math.max(lineHeight * 3, this.sigmaY * 1.5);
-    this.biasY = Math.max(-cap, Math.min(cap, this.biasY));
+  /** The offset this gaze y implies if the reader is on line `index` (gain applied, bias not). */
+  offsetFor(y: number, index: number): number {
+    const L = this.lines[index];
+    return y - (this.seenY((L.top + L.bottom) / 2) - this.biasY);
+  }
+
+  /**
+   * Move the offset toward `target`, as if `sec` seconds of reading had shown it (time constant
+   * biasTau), limited to `lo`..`hi`. The caller decides which moments are trustworthy evidence.
+   */
+  learnBias(target: number, sec: number, lo: number, hi: number) {
+    const alpha = 1 - Math.exp(-sec / this.biasTau);
+    this.biasY = Math.max(lo, Math.min(hi, this.biasY + alpha * (target - this.biasY)));
   }
 
   best(): { index: number; prob: number; off: number } {

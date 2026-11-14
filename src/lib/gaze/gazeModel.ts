@@ -11,6 +11,30 @@ export interface CalibSample {
   point: number; // which calibration dot this sample belongs to
 }
 
+/**
+ * Smallest scale (standard deviation) each raw head input is given when fitting, in its own
+ * units. Inputs 6-13 are head pose and position (see faceTracker.ts). People hold their head
+ * very still while looking at calibration dots, then move it normally while reading. Scaled by
+ * the tiny calibration spread, a normal head movement looked like a huge change, and the
+ * model's head weights threw the gaze thousands of pixels off the screen. These floors are
+ * roughly how much each input varies during ordinary reading (measured in real sessions,
+ * 2026-11-14), so the fit can only lean on head position as far as such movement justifies.
+ */
+const HEAD_SCALE_FLOOR: Record<number, number> = { 6: 0.015, 7: 0.03, 8: 0.05, 9: 0.05, 10: 0.08, 11: 0.012, 12: 0.02, 13: 0.006 };
+/**
+ * When predicting, each raw input is kept within its calibration range widened by this share
+ * of the range (plus the head floor): beyond what calibration saw, a linear model's output is
+ * a guess, and a wild one.
+ */
+const CLAMP_MARGIN = 0.25;
+
+export interface FitOptions {
+  /** Apply HEAD_SCALE_FLOOR (default true). */
+  headFloor?: boolean;
+  /** Clamp inputs to the calibration range when predicting (default true). */
+  clamp?: boolean;
+}
+
 function expand(f: number[]): number[] {
   const u = (f[0] + f[1]) / 2;
   const v = (f[2] + f[3]) / 2;
@@ -19,6 +43,19 @@ function expand(f: number[]): number[] {
   return [...f, u * u, v * v, u * v, ap * ap, u * f[6], v * f[7], ap * f[7]];
 }
 
+/** Everything a fitted GazeModel needs to predict, as plain JSON (for saving a calibration). */
+export interface GazeModelState {
+  mean: number[];
+  std: number[];
+  wx: number[];
+  wy: number[];
+  lambda: number;
+  range: { lo: number[]; hi: number[] } | null;
+}
+
+const finiteArray = (v: unknown, n?: number): v is number[] =>
+  Array.isArray(v) && (n === undefined || v.length === n) && v.every((x) => typeof x === "number" && Number.isFinite(x));
+
 export class GazeModel {
   private constructor(
     private mean: number[],
@@ -26,10 +63,33 @@ export class GazeModel {
     private wx: number[],
     private wy: number[],
     public readonly lambda: number,
+    /** Allowed range of each raw input when predicting (null: no clamping). */
+    private range: { lo: number[]; hi: number[] } | null,
   ) {}
 
+  toJSON(): GazeModelState {
+    return { mean: this.mean, std: this.std, wx: this.wx, wy: this.wy, lambda: this.lambda, range: this.range };
+  }
+
+  /** Rebuild a saved model, or null if the data isn't a consistent model. */
+  static fromJSON(v: unknown): GazeModel | null {
+    if (!v || typeof v !== "object") return null;
+    const s = v as Partial<GazeModelState>;
+    const d = Array.isArray(s.mean) ? s.mean.length : 0;
+    if (d === 0 || d > 64 || !finiteArray(s.mean, d) || !finiteArray(s.std, d) || !finiteArray(s.wx, d + 1) || !finiteArray(s.wy, d + 1)) return null;
+    if (s.std.some((x) => x <= 0) || typeof s.lambda !== "number" || !Number.isFinite(s.lambda)) return null;
+    let range: GazeModelState["range"] = null;
+    if (s.range) {
+      if (!finiteArray(s.range.lo) || !finiteArray(s.range.hi, s.range.lo.length)) return null;
+      range = { lo: s.range.lo, hi: s.range.hi };
+    }
+    return new GazeModel(s.mean, s.std, s.wx, s.wy, s.lambda, range);
+  }
+
   private row(features: number[]): number[] {
-    const e = expand(features);
+    const r = this.range;
+    const f = r ? features.map((v, i) => Math.max(r.lo[i], Math.min(r.hi[i], v))) : features;
+    const e = expand(f);
     return [1, ...e.map((v, i) => (v - this.mean[i]) / this.std[i])];
   }
 
@@ -38,15 +98,25 @@ export class GazeModel {
     return { x: dot(r, this.wx), y: dot(r, this.wy) };
   }
 
-  static fit(samples: CalibSample[], fixedLambda?: number): GazeModel {
+  static fit(samples: CalibSample[], fixedLambda?: number, opts: FitOptions = {}): GazeModel {
     if (samples.length < 10) throw new Error("Not enough calibration data");
+    const headFloor = opts.headFloor ?? true, clamp = opts.clamp ?? true;
+    const nRaw = samples[0].features.length;
+    let range: { lo: number[]; hi: number[] } | null = null;
+    if (clamp) {
+      const lo = Array.from({ length: nRaw }, (_, i) => Math.min(...samples.map((s) => s.features[i])));
+      const hi = Array.from({ length: nRaw }, (_, i) => Math.max(...samples.map((s) => s.features[i])));
+      const m = lo.map((l, i) => CLAMP_MARGIN * (hi[i] - l) + (headFloor ? (HEAD_SCALE_FLOOR[i] ?? 0) : 0));
+      range = { lo: lo.map((l, i) => l - m[i]), hi: hi.map((h, i) => h + m[i]) };
+    }
     const E = samples.map((s) => expand(s.features));
     const d = E[0].length;
     const mean = new Array(d).fill(0);
     const std = new Array(d).fill(0);
     for (const e of E) e.forEach((v, i) => (mean[i] += v / E.length));
     for (const e of E) e.forEach((v, i) => (std[i] += (v - mean[i]) ** 2 / E.length));
-    for (let i = 0; i < d; i++) std[i] = Math.sqrt(std[i]) || 1;
+    const floors = headFloor ? scaleFloors(mean, nRaw) : new Array(d).fill(0);
+    for (let i = 0; i < d; i++) std[i] = Math.max(Math.sqrt(std[i]) || 1, floors[i]);
 
     const X = E.map((e) => [1, ...e.map((v, i) => (v - mean[i]) / std[i])]);
     const xs = samples.map((s) => s.x);
@@ -55,7 +125,7 @@ export class GazeModel {
     const fitWith = (lambda: number, keep?: boolean[]) => {
       const idx = keep ? X.map((_, i) => i).filter((i) => keep[i]) : X.map((_, i) => i);
       const Xk = idx.map((i) => X[i]);
-      return new GazeModel(mean, std, ridge(Xk, idx.map((i) => xs[i]), lambda), ridge(Xk, idx.map((i) => ys[i]), lambda), lambda);
+      return new GazeModel(mean, std, ridge(Xk, idx.map((i) => xs[i]), lambda), ridge(Xk, idx.map((i) => ys[i]), lambda), lambda, range);
     };
 
     // Choose λ with leave-one-dot-out cross-validation.
@@ -92,6 +162,21 @@ export class GazeModel {
     const keep = resid.map((r) => r <= cut);
     return keep.filter(Boolean).length > samples.length * 0.6 ? fitWith(lambda, keep) : first;
   }
+}
+
+/**
+ * Scale floors for every expanded input (see expand()): the raw head floors, and for the three
+ * terms that multiply a head input by an eye input, that floor times the eye input's typical size.
+ */
+function scaleFloors(mean: number[], nRaw: number): number[] {
+  const f = new Array(mean.length).fill(0);
+  for (const [i, v] of Object.entries(HEAD_SCALE_FLOOR)) f[Number(i)] = v;
+  // expand() appends to the raw inputs: u², v², u·v, ap², then u·f6, v·f7, ap·f7.
+  const u = (mean[0] + mean[1]) / 2, v = (mean[2] + mean[3]) / 2, ap = (mean[4] + mean[5]) / 2;
+  f[nRaw + 4] = Math.abs(u) * HEAD_SCALE_FLOOR[6];
+  f[nRaw + 5] = Math.abs(v) * HEAD_SCALE_FLOOR[7];
+  f[nRaw + 6] = Math.abs(ap) * HEAD_SCALE_FLOOR[7];
+  return f;
 }
 
 export interface ValidationResult {

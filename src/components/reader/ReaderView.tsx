@@ -8,11 +8,10 @@ import type { FaceTracker } from "@/lib/gaze/faceTracker";
 import type { WebEyeTrackSource } from "@/lib/gaze/webEyeTrackSource";
 import type { LineBox } from "@/lib/gaze/lineHmm";
 import { sigmaYFor } from "@/lib/gaze/gazeModel";
-import { loadPace, type AxisMap } from "@/lib/gaze/readingCalibration";
+import { loadPace } from "@/lib/gaze/readingPace";
 import { OneEuroFilter } from "@/lib/gaze/oneEuro";
+import { joinDevGazeLog, roundFeatures, type DevGazeLog } from "@/lib/gaze/devLog";
 import { ReadingTracker, type MarkerInfo, type ToastInfo, type TrackingMode } from "@/lib/gaze/readingTracker";
-import { calibrationMeta, GazeRecorder } from "@/lib/gaze/recorder";
-import { labelsFor, STEP_TEXT, stepForPage } from "@/lib/gaze/testProtocol";
 import type { ReadingState, ResumeState, SessionReport } from "@/lib/types";
 import { useTheme, type ThemeChoice } from "@/components/ThemeToggle";
 import { IconBug, IconChevronLeft, IconChevronRight, IconSettings, IconX } from "@/components/icons";
@@ -34,42 +33,6 @@ const COL_GAP = 120;
 const TOP_BAR = 56;
 const BOTTOM_BAR = 60;
 
-/**
- * Developer tool: record this session's eye data (numbers only) to a file, for tuning the
- * tracker with scripts/replay.ts. On with ?record=1 in the address bar, or the gear menu.
- */
-const RECORD_KEY = "ra-record";
-function recordingWanted(): boolean {
-  try {
-    return new URLSearchParams(window.location.search).get("record") === "1" || localStorage.getItem(RECORD_KEY) === "1" || labelledTestWanted();
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Developer tool: the labelled tracker test (?test=1). Each page shows what to do on it
- * (read, skim, read twice, skip), and the recording carries those labels so it can be scored.
- */
-function labelledTestWanted(): boolean {
-  try {
-    return new URLSearchParams(window.location.search).get("test") === "1";
-  } catch {
-    return false;
-  }
-}
-
-function downloadJson(name: string, data: unknown) {
-  const url = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: "application/json" }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 10_000);
-}
-
 export function loadPrefs(): ReaderPrefs {
   try {
     // The gaze debug view is a developer tool: it always starts hidden (toggle with G).
@@ -77,11 +40,6 @@ export function loadPrefs(): ReaderPrefs {
   } catch {
     return DEFAULT_PREFS;
   }
-}
-
-/** Debug label for one axis of the reading-calibration correction. */
-function axisLabel(axis: string, m: AxisMap) {
-  return `${axis} a ${m.a.toFixed(2)} b ${Math.round(m.b)}px${m.knots ? " bent" : ""}`;
 }
 
 export function lineHeightFor(prefs: ReaderPrefs) {
@@ -119,6 +77,8 @@ export function ReaderView({
   resume,
   onFinish,
   onPause,
+  onRecalibrated,
+  outOfFullscreen = false,
 }: {
   title: string;
   paragraphs: string[];
@@ -132,6 +92,10 @@ export function ReaderView({
   resume: ResumeState | null;
   onFinish: (report: SessionReport) => void;
   onPause: (report: SessionReport, state: ResumeState) => void;
+  /** A new calibration was made mid-session (to save it to the account). */
+  onRecalibrated?: (r: CalibrationResult) => void;
+  /** Left full screen: reading is paused (counted like leaving the tab) until it's back. */
+  outOfFullscreen?: boolean;
 }) {
   const [prefs, setPrefs] = useState<ReaderPrefs>(initialPrefs);
   const [mode, setMode] = useState<TrackingMode>(initialMode);
@@ -148,10 +112,6 @@ export function ReaderView({
   const [confirmFinish, setConfirmFinish] = useState(false);
   const [recalibrating, setRecalibrating] = useState(false);
   const [theme, setTheme] = useTheme();
-  // ReaderView only ever renders in the browser (after camera setup), so reading the URL here is safe.
-  const [recording, setRecording] = useState(() => initialMode !== "none" && recordingWanted());
-  const recorderRef = useRef<GazeRecorder | null>(null);
-  const [labelledTest] = useState(() => initialMode === "gaze" && labelledTestWanted());
 
   const innerRef = useRef<HTMLDivElement>(null);
   const trackerRef = useRef<ReadingTracker | null>(null);
@@ -160,6 +120,18 @@ export function ReaderView({
   const gazeDotRef = useRef<HTMLDivElement>(null);
   const lineHiRef = useRef<HTMLDivElement>(null);
   const debugRef = useRef<HTMLDivElement>(null);
+  // Development only: the tracker's internals, sent to data/gaze-debug.jsonl (see devGazeLog).
+  const devLogRef = useRef<DevGazeLog | null>(null);
+  const rawGazeRef = useRef<{ x: number; y: number } | null>(null);
+  const featuresRef = useRef<number[] | null>(null);
+  useEffect(() => {
+    const { log, leave } = joinDevGazeLog();
+    devLogRef.current = log;
+    return () => {
+      leave();
+      devLogRef.current = null;
+    };
+  }, []);
   const showGazeRef = useRef(prefs.showGaze);
   const calibRef = useRef(calibration);
   const modeRef = useRef(mode);
@@ -289,21 +261,38 @@ export function ReaderView({
         aids: prefs.aids,
         // Own pace from this session's reading calibration, else the last one measured here.
         secPerWord: calibration?.secPerWord ?? loadPace()?.secPerWord,
-        alignedByReading: !!calibration?.readingFit?.ok,
       },
       performance.now() / 1000,
     );
     rt.onState = setState;
     rt.onMarker = setMarker;
     rt.onToast = setToast;
+    devLogRef.current?.push({ k: "start", at: new Date().toISOString(), viewport: { w: window.innerWidth, h: window.innerHeight }, lineH, sigmaY, mode, engine: calibration?.engine, validation: v, secPerWord: calibration?.secPerWord ?? loadPace()?.secPerWord ?? null });
     rt.onDebug = (d) => {
+      const log = devLogRef.current;
+      if (log && modeRef.current === "gaze") {
+        const page = pageRef.current;
+        if (page !== log.page) {
+          log.page = page;
+          const ls = layout.byPage[page] ?? [];
+          log.push({ k: "page", page, lines: ls.map((l) => ({ i: l.index, top: Math.round(l.top), bottom: Math.round(l.bottom), left: Math.round(l.left), right: Math.round(l.right) })) });
+        }
+        const r1 = (p: { x: number; y: number } | null) => (p ? { x: Math.round(p.x), y: Math.round(p.y) } : null);
+        log.push({
+          k: "f", t: Math.round(performance.now()) / 1000, page, raw: r1(rawGazeRef.current), gaze: r1(d.gaze), seen: r1(d.seen), feat: roundFeatures(featuresRef.current),
+          bias: Math.round(d.biasY), gain: Math.round(d.gain * 1000) / 1000, line: d.line ? d.line.index : null,
+          p: Math.round(d.lineProb * 100) / 100, off: Math.round(d.offProb * 100) / 100, state: d.state, face: d.face,
+        });
+      }
       if (!showGazeRef.current) return;
-      if (gazeDotRef.current && d.gaze) {
+      if (gazeDotRef.current && d.seen) {
         gazeDotRef.current.style.opacity = "1";
-        // Draw the gaze the way the line model sees it: minus the vertical offset it has learned
-        // while you read (the "bias" below). Otherwise the dot sits a constant distance above or
-        // below the highlighted line even when the tracker has the right line.
-        gazeDotRef.current.style.transform = `translate(${d.gaze.x - 9}px, ${d.gaze.y - d.biasY - 9}px)`;
+        // Draw the gaze the way the line model sees it: with the vertical offset ("bias" below)
+        // AND the vertical stretch it has learned both undone. With only the offset undone, the
+        // dot drifted from the highlighted line further down the page whenever the stretch
+        // wasn't 1. The dot is still one moment of noisy gaze; the highlight weighs several
+        // seconds of it plus reading order, and is usually the one on the right line.
+        gazeDotRef.current.style.transform = `translate(${d.seen.x - 9}px, ${d.seen.y - 9}px)`;
       }
       if (lineHiRef.current) {
         if (d.line) {
@@ -316,15 +305,9 @@ export function ReaderView({
       if (debugRef.current) {
         debugRef.current.textContent =
           `state ${d.state} · line ${d.line ? d.line.index : "-"} (${Math.round(d.lineProb * 100)}%) · off ${Math.round(d.offProb * 100)}%` +
-          ` · bias ${Math.round(d.biasY)}px · stretch ${d.gain.toFixed(2)} · sweeps/20s ${d.sweeps} · ${Math.round(d.fps)} fps${d.face ? "" : " · no face"}` +
-          // Reading-calibration correction (corrected y = a·y + b): with "bias", tells where an offset comes from.
-          (calibRef.current?.readingFit ? ` · readfit ${axisLabel("y", calibRef.current.readingFit)} ${calibRef.current.readingFit.x ? axisLabel("x", calibRef.current.readingFit.x) : "x –"}` : " · no readfit");
+          ` · bias ${Math.round(d.biasY)}px · stretch ${d.gain.toFixed(2)} · sweeps/20s ${d.sweeps} · ${Math.round(d.fps)} fps${d.face ? "" : " · no face"}`;
       }
     };
-    if (recording) {
-      recorderRef.current = newRecorder();
-      rt.attachTap(recorderRef.current);
-    }
     if (resume) rt.restore(resume, performance.now() / 1000);
     rt.setPage(layout.byPage[pageRef.current] ?? [], pageRef.current, performance.now() / 1000, "relayout");
     trackerRef.current = rt;
@@ -350,6 +333,8 @@ export function ReaderView({
       if (!rt || recalibratingRef.current) return;
       let gaze = null, fast = null;
       const g = modeRef.current === "gaze" ? (calibRef.current?.estimator.predict(f) ?? null) : null;
+      rawGazeRef.current = g;
+      featuresRef.current = f.features;
       if (g) {
         gaze = { x: fx.filter(g.x, f.t), y: fy.filter(g.y, f.t) };
         fast = { x: qx.filter(g.x, f.t), y: qy.filter(g.y, f.t) };
@@ -362,9 +347,14 @@ export function ReaderView({
     recalibratingRef.current = recalibrating;
   }, [recalibrating]);
 
-  // Tab switches count as distractions.
+  // Tab switches count as distractions, and so does leaving full screen (reading pauses).
+  const outOfFullscreenRef = useRef(outOfFullscreen);
   useEffect(() => {
-    const onVis = () => trackerRef.current?.onVisibility(document.hidden, performance.now() / 1000);
+    outOfFullscreenRef.current = outOfFullscreen;
+    trackerRef.current?.onVisibility(document.hidden || outOfFullscreen, performance.now() / 1000);
+  }, [outOfFullscreen]);
+  useEffect(() => {
+    const onVis = () => trackerRef.current?.onVisibility(document.hidden || outOfFullscreenRef.current, performance.now() / 1000);
     document.addEventListener("visibilitychange", onVis);
     return () => document.removeEventListener("visibilitychange", onVis);
   }, []);
@@ -395,7 +385,7 @@ export function ReaderView({
         setConfirmFinish(false);
         return;
       }
-      if (settingsOpen || confirmFinish || recalibrating) return;
+      if (settingsOpen || confirmFinish || recalibrating || outOfFullscreenRef.current) return;
       if ((e.target as HTMLElement)?.tagName === "INPUT") return;
       if (["ArrowRight", "PageDown", " "].includes(e.key)) {
         e.preventDefault();
@@ -405,6 +395,9 @@ export function ReaderView({
         goTo(pageRef.current - 1, true);
       } else if (e.key.toLowerCase() === "g" && modeRef.current === "gaze") {
         setPrefs((p) => ({ ...p, showGaze: !p.showGaze }));
+      } else if (e.key.toLowerCase() === "m" && devLogRef.current) {
+        // Development only: mark "I'm going back to re-read now" in the gaze log.
+        devLogRef.current.push({ k: "mark", t: Math.round(performance.now()) / 1000, page: pageRef.current });
       }
     };
     window.addEventListener("keydown", onKey);
@@ -455,44 +448,6 @@ export function ReaderView({
     };
   }, []);
 
-  // ----- recording eye data (developer tool) -----
-  function newRecorder() {
-    return new GazeRecorder({
-      userAgent: navigator.userAgent,
-      viewport: { w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio },
-      fullscreen: !!document.fullscreenElement,
-      fontSize: prefs.size,
-      calibration: calibrationMeta(calibRef.current),
-    });
-  }
-
-  function setRecordingOn(on: boolean) {
-    try {
-      if (on) localStorage.setItem(RECORD_KEY, "1");
-      else localStorage.removeItem(RECORD_KEY);
-    } catch {}
-    const rt = trackerRef.current;
-    if (on && rt && !recorderRef.current) {
-      recorderRef.current = newRecorder();
-      rt.attachTap(recorderRef.current, performance.now() / 1000);
-    } else if (!on) {
-      rt?.detachTap();
-      recorderRef.current = null;
-    }
-    setRecording(on);
-  }
-
-  /** Save what's been recorded so far to a file (also done automatically on Pause / Finish). */
-  function saveRecording() {
-    const rec = recorderRef.current;
-    if (!rec || rec.frameCount === 0) return;
-    rec.setMeta({ calibration: calibrationMeta(calibRef.current), savedAt: new Date().toISOString() });
-    // Labelled test: which step each paragraph was read under (from the page it sits on).
-    if (labelledTest && layout) rec.setMeta({ labels: labelsFor(layout.byPage, paragraphs.length) });
-    const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
-    downloadJson(`read-assist-eye-data-${stamp}.json`, rec);
-  }
-
   function calibInfo(): { quality: SessionReport["calibrationQuality"]; errorPx: number | null } {
     const v = calibration?.validation;
     if (mode === "gaze" && v) return { quality: v.quality, errorPx: Math.round(v.meanErrorPx) };
@@ -504,7 +459,6 @@ export function ReaderView({
   function finish() {
     const rt = trackerRef.current;
     if (!rt) return;
-    saveRecording();
     onFinish(rt.buildReport(performance.now() / 1000, paragraphs, calibInfo()));
   }
 
@@ -513,7 +467,6 @@ export function ReaderView({
     if (!rt) return;
     const now = performance.now() / 1000;
     const info = calibInfo();
-    saveRecording();
     onPause(rt.buildReport(now, paragraphs, info), rt.exportState(now, firstWordOfPage.current, info));
   }
 
@@ -560,34 +513,19 @@ export function ReaderView({
         <div className="flex items-center gap-2 min-w-0" title={stateLabel}>
           <span className="h-2 w-2 rounded-full shrink-0 transition-colors duration-700" style={{ background: stateColor }} />
           <span className="text-sm text-muted truncate">{title}</span>
-          {recording && (
-            <span className="text-[11px] font-semibold tracking-wide shrink-0" style={{ color: "var(--away)" }} title="Eye data is being recorded to a file on this computer (numbers only, no video)">
-              ● REC
-            </span>
-          )}
         </div>
         <div className="ml-auto flex items-center gap-2">
           <button className="btn btn-ghost !px-2.5 !py-1.5 text-muted" onClick={() => setSettingsOpen((o) => !o)} aria-label="Reader settings">
             <IconSettings size={16} />
           </button>
-          <button className="btn btn-ghost !py-1.5 text-sm" onClick={pause} title="Save your progress and come back later">
-            Pause
+          <button className="btn btn-ghost !py-1.5 text-sm" onClick={pause} title="Save your place and progress, leave, and pick up here later">
+            Save &amp; exit
           </button>
           <button className="btn btn-ghost !py-1.5 text-sm" onClick={() => (lastPage ? finish() : setConfirmFinish(true))}>
             Finish session
           </button>
         </div>
       </header>
-
-      {/* Labelled tracker test (?test=1): what to do on this page */}
-      {labelledTest && mode === "gaze" && (
-        <div className="absolute left-1/2 -translate-x-1/2 z-20 text-center pointer-events-none" style={{ top: TOP_BAR - 4, width: pageW }}>
-          <span className="inline-block rounded-md px-3 py-1 text-xs bg-surface border border-border shadow-sm">
-            <b>Test, page {page + 1}: {STEP_TEXT[stepForPage(page)].title}.</b>{" "}
-            <span className="text-muted">{STEP_TEXT[stepForPage(page)].detail}</span>
-          </span>
-        </div>
-      )}
 
       {/* Pages */}
       <div className="absolute overflow-hidden" style={{ left: pageLeft, top: pageTop, width: pageW, height: pageH, zIndex: 1 }}>
@@ -724,22 +662,6 @@ export function ReaderView({
                 icon={<IconBug size={14} />}
               />
             )}
-            {mode === "gaze" && (
-              <div>
-                <Toggle
-                  label="Record eye data (debug)"
-                  hint="Numbers only, no video. Saved as a file on this computer when you pause or finish."
-                  checked={recording}
-                  onChange={setRecordingOn}
-                  icon={<IconBug size={14} />}
-                />
-                {recording && (
-                  <button className="btn btn-ghost w-full mt-2 text-sm" onClick={saveRecording}>
-                    Save eye data now
-                  </button>
-                )}
-              </div>
-            )}
             {/* Camera on: recalibrate (eye tracking) or switch this session to eye tracking (focus-only).
                 No camera at all: nothing to offer. */}
             {tracker && mode !== "none" && (
@@ -771,11 +693,11 @@ export function ReaderView({
             <h3 className="font-semibold text-lg">Finish this session?</h3>
             <p className="text-muted text-sm mt-1.5">
               You&apos;re on page {page + 1} of {layout?.pages}. Pages you haven&apos;t opened will count as skipped, and we&apos;ll summarize them for you.
-              Need a break instead? <b className="text-fg">Pause</b> saves your place and your progress so far.
+              Need a break instead? <b className="text-fg">Save &amp; exit</b> keeps your place and your progress so far, and you can pick up here later.
             </p>
             <div className="flex justify-end gap-2 mt-5">
               <button className="btn btn-ghost" onClick={() => setConfirmFinish(false)}>Keep reading</button>
-              <button className="btn btn-ghost" onClick={pause}>Pause for later</button>
+              <button className="btn btn-ghost" onClick={pause}>Save &amp; exit</button>
               <button className="btn btn-primary" onClick={finish}>Finish</button>
             </div>
           </div>
@@ -795,6 +717,7 @@ export function ReaderView({
           }}
           onDone={(r) => {
             setCalibration(r);
+            onRecalibrated?.(r);
             setMode("gaze");
             const sigmaY = sigmaYFor(r.validation, lineH);
             trackerRef.current?.retune(sigmaY, 0, "gaze");

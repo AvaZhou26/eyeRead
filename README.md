@@ -88,12 +88,14 @@ To stop the app, click the terminal and press **Ctrl + C**.
 2. Under **Assigned readings**, click **How Your Eyes Actually Read**, then **Start reading**.
 3. Click **Turn on camera** and allow camera access when Chrome asks.
 4. Wait until all five checks are green (face visible, centered, distance, lighting, glare). If lighting is red, face a lamp or window; don't sit with a window behind you. If you wear glasses and glare is yellow, move the lamp to the side or tilt the screen until it turns green. Sitting closer also makes tracking sharper.
-5. Click **Calibrate & start**. The app goes full screen.
+5. Click **Calibrate & start**. The app goes full screen. Calibration and reading only happen in full screen: if you leave it (Esc), everything pauses behind a **Return to full screen** button (calibration restarts from the first dot; a reading session just waits, and the time away counts like leaving the tab). Browser zoom doesn't matter: gaze is converted to physical screen pixels.
    - **Look at each dot, then click it** (13 dots). Keep your head roughly still.
    - Then **just look** at 5 more dots (no clicking).
    - You'll get a rating (Great / Okay / Rough). Move your eyes around: a circle should roughly follow your gaze. If it's "Rough", click **Recalibrate**.
-6. Click **Start reading**. One more short step follows: **read a one-page passage (about 45 seconds) once at your normal pace**, then press **Space**. This lines the tracker up with how your eyes move down real text and measures your own reading speed, so "read" vs "skimmed" is judged against *your* pace (shown on the report as "your usual N"). You can skip it; the last pace measured on this browser is used instead.
+6. Click **Start reading**. One more short step follows: **read a one-page passage (about 45 seconds) once at your normal pace**, then press **Space**. This measures your own reading speed (it doesn't change the eye tracking), so "read" vs "skimmed" is judged against *your* pace (shown on the report as "your usual N"). You can skip it; the last pace measured on this browser is used instead.
 7. Click **Start reading** again and read normally. Use **→** / **Space** for the next page and **←** to go back.
+
+You calibrate **once per account**: the calibration (and your reading pace) is saved, and every later reading (including continuing a saved session) shows **Start reading** right after the camera checks, with a **Recalibrate** button beside it. You're never asked to calibrate again unless you press **Recalibrate**, so do that if you switch to a different screen or the tracking feels off. (With the experimental `?gaze=webeyetrack` engine, you calibrate every time: its calibration can't be saved.)
 
 ### Things to try while reading
 
@@ -106,7 +108,7 @@ To stop the app, click the terminal and press **Ctrl + C**.
 | Switch to another browser tab and come back | Counted as a distraction in your report. |
 | Gear icon (top right) | Change theme (light / dark / sepia), font, text size, turn reading aids off, or recalibrate. |
 
-8. Need a break? Click **Pause** (top right). Your place and everything measured so far are saved. Back on the reading's page, **Continue reading** picks up on the same page, and the sittings add up to ONE report. (**Start over instead** begins a fresh session.)
+8. Need a break? Click **Save & exit** (top right). Your place and everything measured so far are saved. Back on the reading's page, **Continue reading** picks up on the same page, and the sittings add up to ONE report. (**Start over instead** begins a fresh session.)
 9. Click **Finish & see report** on the last page, or **Finish session** at the top. After a few seconds you'll see:
    - coverage, focus, reading speed and time
    - a paragraph-by-paragraph strip, and the full text colored by read / skimmed / skipped, with re-read paragraphs marked
@@ -154,7 +156,7 @@ Everything is in a SQLite database file, `data/read-assist.db` (accounts, course
 
 - **"Camera access was blocked"**: click the camera icon in Chrome's address bar, choose *Allow*, and reload. On macOS also check System Settings → Privacy & Security → Camera → Google Chrome.
 - **Calibration says "Rough"**: improve the light on your face, sit about an arm's length away, and try to keep your head still during calibration and reading. Glasses with strong glare can hurt accuracy.
-- **The gaze dot drifts after a while**: that's normal for webcams. The app slowly corrects drift on its own; if it gets bad, use gear icon → **Recalibrate**.
+- **The gaze dot drifts after a while**: that's normal for webcams. The app slowly corrects drift on its own; if it gets bad, use gear icon → **Recalibrate eye tracking** (or **Recalibrate** on the camera screen before reading). A new calibration replaces your saved one.
 - **Gemini errors** (the terminal shows `[gemini] ... failed`): check the key in `.env.local`. If the model name is rejected, add a line like `GEMINI_MODEL=gemini-2.5-flash` (any model listed in Google AI Studio) and restart.
 
 ---
@@ -162,28 +164,23 @@ Everything is in a SQLite database file, `data/read-assist.db` (accounts, course
 ## How the eye tracking works (short version)
 
 1. **Face → eye features.** Google's MediaPipe Face Landmarker runs in your browser (WebAssembly + GPU) and finds 478 face points, including both irises. We turn those into ~14 numbers per frame: where each iris sits inside its eye, eye openness and head pose.
-2. **Calibration.** While you look at the dots, we learn a personal mapping from those numbers to a screen position. It uses ridge regression, with the strength picked by leave-one-dot-out cross-validation. The 5 validation dots measure your real accuracy.
-3. **Which line?** Webcam gaze is only accurate to a few lines, so a *Hidden Markov Model* combines that rough position with how reading works. You stay on a line, and after a big left-jump (a *return sweep*) you're on the next one. It also:
-   - learns your calibration drift from the start of every page, since people begin reading at the top line
+2. **Calibration.** While you look at the dots, we learn a personal mapping from those numbers to a screen position. It uses ridge regression, with the strength picked by leave-one-dot-out cross-validation. The 5 validation dots measure your real accuracy. Head position only gets as much weight as normal reading movement justifies (people hold very still for the dots, then move while reading), and when predicting, each input stays within what calibration saw (plus a margin), so the gaze can't fly off the screen.
+3. **Which line?** Webcam gaze is only accurate to a few lines, so a *Hidden Markov Model* combines that rough position with how reading works. You stay on a line, and after a big left-jump you're usually on the next one (a *return sweep*). The jump's vertical size decides between that, a hop back within the line and a jump back to re-read. It also:
+   - learns your calibration drift from the start of every page, since people begin reading at the top line, and from the middle of every line you finish (never from the moments around a line change, when the smoothed gaze is still on its way). It also learns how fast the drift is going, so the correction keeps up with it
    - learns whether the gaze is stretched or squashed vertically from the end of every page: when you press **→**, your eyes were on the last line
-   - credits the words near your eyes more than the rest of the line, so reading half of each line shows up as skimming
-   - counts "passes": every jump back to the left margin finishes one pass of a line, and more passes than lines (with the extra time to match) means something was read twice
+   - corrects a sideways shift: while you read, your gaze sweeps across the text column, so the middle of your recent gaze is lined up with the middle of the column
    - uses short paragraph-ending lines as landmarks
    - treats consecutive webcam frames as weak, correlated evidence, so noise can't overpower the reading-order logic
 4. **What did you read?** Each moment's time is spread over the words on the lines you're probably on.
    - **Read:** at least 35% of normal reading time
    - **Skimmed:** 15–35%
    - **Skipped:** less than that
-   - **Re-read:** jumping back 2+ lines and staying there, but only over lines you had already *read*. Going back to lines you skimmed or skipped just counts as reading them. Lingering much longer than your usual pace on a paragraph also counts.
+   - **Re-read:** jumping back 1+ lines, counted once the evidence that you're on earlier lines has built up (not from any single moment), and only over lines you had already *read*. Going back to lines you skimmed or skipped just counts as reading them. Lingering much longer than your usual pace on a paragraph also counts.
 5. **Gentle aids.** The tracker never shows anything that moves with your eyes. The bookmark appears only when you look away or skip a block of lines, and fades on its own.
 
-Simulation check: `npm run simulate` feeds a fake reader with noisy, offset gaze through the real tracker. In recent runs, the estimated line was within ±1 of the true line 92–100% of the time, skipped blocks and look-aways were caught with the marker on the right line, and re-reading was detected in nearly every run at typical noise (and about half the time when the gaze is very noisy).
+Simulation check: `npm run simulate` feeds a fake reader with noisy, offset gaze through the real tracker. In recent runs, the estimated line was within ±1 of the true line 92–100% of the time, skipped blocks and look-aways were caught with the marker on the right line, and re-reading was detected in about 6 of 10 runs (it's the least reliable signal with webcam-level noise).
 
-Two more tools for working on the tracker:
-- `npm run simulate:pages` reads several pages with a stretched gaze and realistic blinks, and prints how often the line estimate is right.
-- `npm run simulate:behaviors` gives each paragraph a behaviour (read, two kinds of skim, re-read one line, re-read it all, skip) and prints how often the report names it correctly.
-- **Labelled test.** Open the reader with `?test=1`: each page tells you what to do on it, and the recording carries those labels, so `npm run replay` can score reading against skimming against re-reading on a real webcam (TESTING.md, step 3c).
-- **Record and replay.** Switch on **Record eye data** in the reader's gear menu (or open the reader with `?record=1`), read, and a JSON file of the session's eye data downloads when you finish (numbers only, no video). `npm run replay -- file.json --linear` plays it back through the tracker and scores it. This is how to tune the tracker against real webcams instead of the simulation; see TESTING.md, step 3b.
+`npx tsx scripts/simulate-reread.ts` is a seeded benchmark for drift and re-reading: simulated readers hop back within lines, jump back 1–5 lines to re-read, blink, and (optionally) drift slowly downward. On 2026-11-14 (gaze noise 1.25 lines) it reported: exact line 89% (was 68%), jumps back of 2+ lines caught 96–98% of the time (1 line back: under 10%, since half a line of re-reading is hard to see at this noise), about 0.03 false re-readings per page, and the drawn gaze dot 0.32 lines off on average (was 0.45; under a strong 1 px/s downward drift it still trails by about half a line).
 
 ### Where things live
 
@@ -199,9 +196,8 @@ Two more tools for working on the tracker:
 | `src/lib/db.ts` | The SQLite database (a local file, or Turso when hosted) |
 | `src/lib/validate.ts` | Checks on data sent by the browser (session reports, form fields) |
 | `scripts/simulate.ts` | Algorithm simulation |
-| `scripts/simulate-pages.ts` | Multi-page simulation (stretched gaze, blinks) |
-| `scripts/simulate-behaviors.ts` | Simulation of reading vs skimming vs re-reading vs skipping |
-| `src/lib/gaze/testProtocol.ts` | The labelled test (`?test=1`): what each page asks for |
-| `scripts/replay.ts` | Plays a recorded session back through the tracker |
-| `src/lib/gaze/recorder.ts` | Records a session's eye data, and the replay logic |
+| `scripts/simulate-pages.ts` | Multi-page simulation with offset, drift and vertical stretch |
+| `scripts/simulate-reread.ts` | Benchmark for downward drift and re-reading detection |
+| `src/lib/gaze/devLog.ts`, `src/app/api/dev/gaze-log/` | Development only: logs real sessions' gaze-tracking internals to `data/gaze-debug.jsonl` |
+| `scripts/replay-gaze-log.ts` | Replays a logged real session through the tracker and scores it |
 | `PLAN.md` | Original research and feasibility plan |

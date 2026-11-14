@@ -118,7 +118,7 @@ export interface AiResult {
 
 /**
  * Everything needed to pick a paused session back up where it left off. Saved by the
- * reader when a student presses Pause; the next "Start reading" restores it.
+ * reader when a student presses "Save & exit"; the next "Continue reading" restores it.
  */
 export interface ResumeState {
   version: 1;
