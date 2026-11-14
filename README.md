@@ -130,6 +130,7 @@ Everything is in a SQLite database file, `data/read-assist.db` (accounts, course
 2. **Calibration.** While you look at the dots, we learn a personal mapping from those numbers to a screen position. It uses ridge regression, with the strength picked by leave-one-dot-out cross-validation. The 5 validation dots measure your real accuracy.
 3. **Which line?** Webcam gaze is only accurate to a few lines, so a *Hidden Markov Model* combines that rough position with how reading works. You stay on a line, and after a big left-jump (a *return sweep*) you're on the next one. It also:
    - learns your calibration drift from the start of every page, since people begin reading at the top line
+   - learns whether the gaze is stretched or squashed vertically from the end of every page: when you press **→**, your eyes were on the last line
    - uses short paragraph-ending lines as landmarks
    - treats consecutive webcam frames as weak, correlated evidence, so noise can't overpower the reading-order logic
 4. **What did you read?** Each moment's time is spread over the words on the lines you're probably on.

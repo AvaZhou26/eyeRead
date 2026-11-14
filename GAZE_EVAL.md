@@ -1,6 +1,10 @@
 # Gaze tracker evaluation: current pipeline vs WebEyeTrack
 
-**Status (2026-11-14): WebEyeTrack is now the reader's default gaze engine.** This was your call after watching it live: you found the hybrid lost accuracy over time. The numbers from the single lab run are below. They show WebEyeTrack better horizontally and worse vertically; keep an eye on line-level accuracy in real sessions. To switch back to MediaPipe + ridge, set `NEXT_PUBLIC_GAZE_ENGINE=mediapipe` or open the reader with `?gaze=mediapipe`.
+**Status (2026-11-14, later): MediaPipe + ridge is the reader's default again.** WebEyeTrack was the default for a short while because its live dot looked better. But the lab run below shows it is much noisier vertically (2.5 lines per frame against 0.9), and vertical accuracy is what decides which line you're on; in real use line tracking felt poor. To try WebEyeTrack, set `NEXT_PUBLIC_GAZE_ENGINE=webeyetrack` or open the reader with `?gaze=webeyetrack`. This decision rests on one lab run, so more `/gaze-lab` rounds are still the best next step. The hybrid measured best but isn't wired into the reader yet.
+
+Two other changes went in at the same time (neither has been tested with a real webcam, only in simulation):
+- **Wider line spacing** in the reader (2.5× the font size instead of 2×), so lines are 50 px apart at the default size.
+- **Stretch correction.** The tracker already learned a vertical *offset* from the first line of each page. It now also learns a vertical *stretch*: when you read down a page and turn it with the keyboard, your eyes were on the last line, so the distance the camera saw between first and last line, compared with the real distance, gives the stretch. `npx tsx scripts/simulate-pages.ts` shows the effect: with the gaze squashed to 85%, exact-line accuracy goes from about 34% to 58%, with no change when there is no stretch.
 
 ## WebEyeTrack: what it is and what it needs
 
@@ -60,7 +64,7 @@ How to read this:
 
 ## What shipped
 
-- **Engine flag:** `gazeEngine()` in `src/lib/gaze/webEyeTrackSource.ts`. The default is `"webeyetrack"`. `NEXT_PUBLIC_GAZE_ENGINE=mediapipe` or the URL param `?gaze=mediapipe` switches back.
+- **Engine flag:** `gazeEngine()` in `src/lib/gaze/webEyeTrackSource.ts`. The default is `"mediapipe"`. `NEXT_PUBLIC_GAZE_ENGINE=webeyetrack` or the URL param `?gaze=webeyetrack` switches to WebEyeTrack.
 - **Loading:** `ReaderApp` loads WebEyeTrack, one instance, alongside the camera. It runs on each FaceTracker frame through `subscribeRaw`. If it fails to load, the reader silently falls back to MediaPipe + ridge.
 - **Calibration** (`Calibration.tsx`, same 13 + 5 dots):
   - In WebEyeTrack mode, it stores up to 4 eye-patch frames per dot and calls `reset()` then `adapt()` (affine + 1 MLP step) right after the 13th dot. The screen shows "Tuning the eye tracker to you…".

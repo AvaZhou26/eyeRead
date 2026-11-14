@@ -42,6 +42,7 @@ export interface DebugSnapshot {
   lineProb: number;
   offProb: number;
   biasY: number;
+  gain: number;
   sweeps: number;
   fps: number;
   face: boolean;
@@ -95,6 +96,15 @@ export class ReadingTracker {
   private anchoring = false;
   private anchorResid: number[] = [];
 
+  // Vertical stretch ("gain") learning. On each page we know two moments for sure: the
+  // reader starts on the first line and, if they read down the page, presses "next" from
+  // the last line. Comparing where the camera saw those two moments with how far apart the
+  // lines really are tells us how stretched the gaze is. See learnGain().
+  private pageAnchorRawY: number | null = null; // raw gaze y while on this page's first line
+  private sweepsOnPage = 0;
+  private yHist: { t: number; y: number }[] = []; // last ~1.5 s of smoothed gaze y
+  private gainObs: number[] = [];
+
   // place marker
   private place = -1; // page-local line index of where you're reading
   private skipCandidate: { line: number; since: number } | null = null;
@@ -140,15 +150,46 @@ export class ReadingTracker {
     this.opts.sigmaY = sigmaY;
     this.hmm.sigmaY = sigmaY;
     this.hmm.biasY = biasY;
+    // A new calibration has its own stretch: forget what we learned about the old one.
+    this.hmm.gain = 1;
+    this.gainObs = [];
+    this.pageAnchorRawY = null;
+  }
+
+  /**
+   * Learn the vertical stretch from the page that was just finished. Only trusted when the
+   * reader clearly read down the page (enough line-to-line return sweeps) and turned it
+   * from the keyboard (a mouse click means the eyes were on the button, not the last line).
+   */
+  private learnGain(lines: LineBox[], now: number) {
+    if (this.opts.mode !== "gaze" || lines.length < 6 || this.pageAnchorRawY === null) return;
+    if (this.sweepsOnPage < 0.6 * (lines.length - 1)) return;
+    const recent = this.yHist.filter((g) => now - g.t >= 0.1 && now - g.t <= 0.8).map((g) => g.y).sort((a, b) => a - b);
+    if (recent.length < 8) return;
+    const first = lines[0], last = lines[lines.length - 1];
+    const span = (last.top + last.bottom) / 2 - (first.top + first.bottom) / 2;
+    if (span < this.opts.lineHeight * 4) return;
+    const obs = (recent[recent.length >> 1] - this.pageAnchorRawY) / span;
+    if (!(obs >= 0.55 && obs <= 1.7)) return; // implausible: they weren't on the last line
+    this.gainObs.push(obs);
+    if (this.gainObs.length > 5) this.gainObs.shift();
+    const sorted = [...this.gainObs].sort((a, b) => a - b);
+    const mid = sorted.length >> 1;
+    const median = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    // One page is a noisy measurement, so move only part of the way until more agree.
+    const trust = (this.gainObs.length + 0.5) / (this.gainObs.length + 1);
+    const gain = 1 + (median - 1) * trust;
+    this.hmm.gain = Math.abs(gain - 1) < 0.03 ? 1 : Math.max(0.6, Math.min(1.6, gain));
   }
 
   /** Called when the page changes (or the layout is rebuilt). */
-  setPage(lines: LineBox[], page: number, now: number, reason: "turn" | "relayout") {
+  setPage(lines: LineBox[], page: number, now: number, reason: "turn" | "relayout", byKeyboard = false) {
     const prevPage = this.page;
     const prevLines = this.lines;
     if (reason === "turn" && page !== prevPage) {
       this.pagesTurned++;
       if (page > prevPage) this.checkRushedPage(prevLines, prevPage, now);
+      if (page === prevPage + 1 && byKeyboard) this.learnGain(prevLines, now);
     }
     this.lines = lines;
     this.page = page;
@@ -157,6 +198,8 @@ export class ReadingTracker {
     this.hmm.setLines(lines, backwards ? "spread" : "top");
     this.anchoring = !backwards && (reason === "turn" || this.pagesTurned === 0);
     this.anchorResid = [];
+    this.pageAnchorRawY = null;
+    this.sweepsOnPage = 0;
     this.pageMax = -1;
     this.place = -1;
     this.skipCandidate = null;
@@ -238,7 +281,7 @@ export class ReadingTracker {
       else if (mode === "gaze" && gaze && lines.length) {
         const colL = lines[0].left, colR = Math.max(...lines.map((l) => l.right));
         const w = colR - colL;
-        const y = gaze.y - this.hmm.biasY;
+        const y = this.hmm.correctY(gaze.y);
         const top = lines[0].top, bottom = lines[lines.length - 1].bottom;
         const margin = Math.max(this.opts.sigmaY * 1.6, lineH * 3);
         if (gaze.x < colL - 0.35 * w || gaze.x > colR + 0.35 * w || y < top - margin || y > bottom + margin) inst = "offtext";
@@ -263,6 +306,7 @@ export class ReadingTracker {
             this.lastSweep = now;
             this.sweepTimes.push(t);
             this.totalSweeps++;
+            this.sweepsOnPage++;
           }
         }
       }
@@ -270,6 +314,11 @@ export class ReadingTracker {
       this.gazeHist = [];
     }
     while (this.sweepTimes.length && t - this.sweepTimes[0] > 20) this.sweepTimes.shift();
+
+    if (mode === "gaze" && gaze && frame?.features) {
+      this.yHist.push({ t: now, y: gaze.y });
+      while (this.yHist.length && now - this.yHist[0].t > 1.5) this.yHist.shift();
+    }
 
     // 3) Line HMM
     if (mode === "gaze" && lines.length && this.anchoring) {
@@ -285,6 +334,7 @@ export class ReadingTracker {
           const med = sorted[sorted.length >> 1];
           const cap = Math.max(lineH * 4, this.opts.sigmaY * 2);
           this.hmm.biasY = Math.max(-cap, Math.min(cap, med));
+          this.pageAnchorRawY = (lines[0].top + lines[0].bottom) / 2 + med;
         }
         this.anchoring = false;
         this.hmm.pin(0);
@@ -350,6 +400,7 @@ export class ReadingTracker {
       lineProb: best.prob,
       offProb: best.off,
       biasY: this.hmm.biasY,
+      gain: this.hmm.gain,
       sweeps: this.sweepTimes.length,
       fps,
       face: !!frame?.face,
