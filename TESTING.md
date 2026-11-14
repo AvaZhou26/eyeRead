@@ -50,57 +50,21 @@ teacher and an **Incognito window** (⌘ + Shift + N) for the student. Each wind
 2. Wait for all five checks to turn green: face, centered, distance, lighting, glare. Face a lamp, not a window. Only "face" and "too dark" block calibration; the others are warnings.
 3. **Calibrate & start**: look at each dot and click it (13 dots), then just look at 5 more.
    - ✅ You get a rating: Great, Okay or Rough. If it's Rough, click **Recalibrate**.
+   - ✅ **Full screen only:** while reading, press **Esc**. A card says **Reading happens in full screen** and the page can't be read or turned until you click **Return to full screen**; you're back on the same page. (Doing this during calibration restarts it from the first dot.)
+   - ✅ **Calibrate once:** open a *different* reading afterwards, and also **Save & exit** then **Continue reading**. Neither asks you to calibrate: after the camera checks the button says **Start reading**, with **Recalibrate** beside it and the date of your calibration. **Recalibrate** runs the dots (and pace passage) again and replaces the saved calibration.
 4. Read normally. Use **→** for the next page.
 5. Press **G** to show the debug dot (where it thinks you look) and the highlighted line. Press **G** again to hide them.
    - ✅ The highlighted line should mostly follow the line you're reading, within a line or so.
    - The debug line also shows **stretch**. It starts at 1.00 and may change after you finish a page with the **→** key: the tracker is correcting itself. Turn pages with the keyboard, not the mouse, so it can learn.
-6. **Try the hybrid engine (experimental):** add `?gaze=hybrid` to the reader URL and calibrate. It adds WebEyeTrack's raw signal to the default tracker, and is only kept if it does at least as well on your validation dots; otherwise it quietly uses the default (the browser console says which). Record a session with each (step 3b) to compare them with numbers.
-7. **Compare with WebEyeTrack:** open the same reading with `?gaze=webeyetrack` added to the reader URL, e.g. `http://localhost:3000/read/<id>?gaze=webeyetrack`, and calibrate again. Note which one follows your lines better.
+   - **Diagnosing problems (dev server only):** every reading session's gaze-tracking numbers are written to `data/gaze-debug.jsonl` (numbers only, no video or text). Press **M** at the moment you go back to re-read, to mark it in the log. Then `npx tsx scripts/replay-gaze-log.ts data/gaze-debug.jsonl` replays the session through the tracker and lists the re-reads it found next to your marks.
+6. **Compare with WebEyeTrack:** open the same reading with `?gaze=webeyetrack` added to the reader URL, e.g. `http://localhost:3000/read/<id>?gaze=webeyetrack`, and calibrate again. Note which one follows your lines better.
    - This is the one thing I couldn't test myself (my browser has no camera), so please tell me how both feel.
 
-## 3b. Record a session so the tracker can be tuned (5 minutes, very useful)
+## 4. Save & exit, then continue (one report)
 
-The tracker can only be improved against real eye data, and a recording lets the same session be replayed through a changed tracker again and again. A recording holds numbers only (gaze points, where the lines sat on screen): no video and none of the text.
-
-1. Open a reading that is at least 3 pages long. In the reader, click the **gear** and switch on **Record eye data (debug)**. A red **● REC** appears at the top left. (Or add `?record=1` to the reader's address before you start.)
-2. Read **every page once, top to bottom, at an even pace**, turning pages with **→**. Don't skip, re-read or look away. This "steady read" lets the replay score the tracker.
-3. Click **Finish session**. A file named `read-assist-eye-data-….json` downloads by itself (also on **Pause**, or any time with **Save eye data now** in the gear menu).
-4. In a terminal in the project folder:
-   ```bash
-   npm run replay -- ~/Downloads/read-assist-eye-data-….json --linear
-   ```
-   - ✅ You get one row per page: how many line jumps were noticed, and how often the tracker's line matched a steady read (**exact** and **±1**).
-   - Send the file and that output to whoever is tuning the tracker. Recordings from different people, lighting and glasses are the most valuable.
-5. Switch **Record eye data** off again when you're done; it stays on for later sessions otherwise.
-
-No webcam handy? `RECORD=sim.json npm run simulate:pages` writes a simulated session you can replay the same way.
-
-## 3c. Labelled test: does it tell reading, skimming and re-reading apart? (8 minutes)
-
-In this test the app tells you what to do on each page, so afterwards we know what really happened and can score the report against it.
-
-1. Use a reading of **8 pages or more** with ordinary paragraphs. Open the reader with `?test=1` added to the address (e.g. `http://localhost:3000/read/<id>?test=1`), turn on the camera and calibrate as usual. Don't resize the window or change the font size during the test.
-2. Each page shows a small instruction at the top. Do exactly that, then press **→**:
-   - **Read this page normally** (every other page)
-   - **Skim this page**: glance over it for the gist
-   - **Read this page twice**: to the end, back to the top, all of it again
-   - **Skip this page**: don't read it, wait two seconds
-   - **Read the first line of each paragraph twice**
-3. Click **Finish session**. The eye-data file downloads (recording is switched on automatically in this mode).
-4. Score it:
-   ```bash
-   npm run replay -- ~/Downloads/read-assist-eye-data-….json
-   ```
-   - ✅ Under **labelled test** there is one row per kind of page: what the report called those paragraphs, how often re-reading was flagged, and the share it got right. The last column is your time on them compared with your normal pace.
-   - In simulation the tracker gets plain reading, quick skimming, skipping and a whole re-read right nearly every time; reading only half of each line about 8 times in 10; a single re-read line about 3 times in 4. Real numbers from a few different people are what we need next.
-
-No webcam handy? `RECORD=test.json npm run simulate:behaviors` writes a simulated labelled test.
-
-## 4. Pause and resume (one report)
-
-1. Mid-reading, click **Pause** (top right).
+1. Mid-reading, click **Save & exit** (top right).
    - ✅ You're back on the reading page with **"Progress saved. You've read about X%"** and a **Continue reading** card.
-2. Click **Continue reading**, then calibrate (or click **Read without eye tracking**).
+2. Click **Continue reading**, then **Start reading** with your saved calibration (or click **Read without eye tracking**).
    - ✅ It opens on the **same page** you paused on.
 3. Read to the end and click **Finish & see report**.
    - ✅ The report header says **"2 sittings"** and the time covers both sittings.
@@ -111,7 +75,7 @@ No webcam handy? `RECORD=test.json npm run simulate:behaviors` writes a simulate
 
 1. In a new session, **skim a paragraph fast**, then go back and read it properly.
    - ✅ In the report it counts as **read**, not re-read (no purple re-read mark).
-2. **Read a paragraph properly**, keep going 2–3 lines, then go back and read it again for a couple of seconds.
+2. **Read a paragraph properly**, keep going 2–3 lines, then go back and read it again for a couple of seconds. (Do the reading-pace passage first: "read properly" is judged against your own pace, and at the default 240 wpm a fast reader's first pass can count as skimmed, so going back doesn't count as re-reading.)
    - ✅ The report marks it **re-read**.
 
 ## 6. Reading habits

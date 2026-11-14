@@ -1,7 +1,7 @@
 "use client";
 // Orchestrates a reading session: camera setup → calibration → reading → saving the report.
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { FaceTracker } from "@/lib/gaze/faceTracker";
 import { gazeEngine, WebEyeTrackSource } from "@/lib/gaze/webEyeTrackSource";
 import type { TrackingMode } from "@/lib/gaze/readingTracker";
@@ -10,8 +10,12 @@ import { Calibration, type CalibrationResult } from "./Calibration";
 import { applyReadingCalibration, ReadingCalibration } from "./ReadingCalibration";
 import { ReaderView, lineHeightFor, loadPrefs, type ReaderPrefs } from "./ReaderView";
 import { Setup, type CameraState } from "./Setup";
+import { enterFullscreen, FullscreenGate, useOutOfFullscreen } from "./fullscreen";
+import { fromSaved, toSaved, type SavedCalibration } from "@/lib/gaze/savedCalibration";
+import { loadPace } from "@/lib/gaze/readingPace";
 
-// calibrate = the dots; readcal = calibrate by reading (vertical fit + personal reading pace)
+// calibrate = the dots; readcal = the reading-pace passage. Both are skipped when the student
+// has a saved calibration (calibrate once per account; Recalibrate redoes them).
 type Phase = "setup" | "calibrate" | "readcal" | "reading" | "saving";
 
 export function ReaderApp({
@@ -20,6 +24,7 @@ export function ReaderApp({
   paragraphs,
   backHref,
   resume,
+  savedCalibration,
 }: {
   readingId: string;
   title: string;
@@ -27,6 +32,8 @@ export function ReaderApp({
   backHref: string;
   /** A paused session to continue, if the student has one for this reading. */
   resume: { sessionId: string; state: ResumeState } | null;
+  /** The student's saved calibration (calibrate once per account), if any. */
+  savedCalibration: SavedCalibration | null;
 }) {
   const router = useRouter();
   const [phase, setPhase] = useState<Phase>("setup");
@@ -39,21 +46,37 @@ export function ReaderApp({
   const [saveError, setSaveError] = useState("");
   const [video, setVideo] = useState<HTMLVideoElement | null>(null);
   const [tracker] = useState(() => new FaceTracker());
-  // WebEyeTrack (for the "webeyetrack" and "hybrid" engines) rides on the FaceTracker's frames;
-  // null = MediaPipe + ridge, the default.
+  // WebEyeTrack (default engine) rides on the FaceTracker's frames; null = MediaPipe + ridge.
   const [wet, setWet] = useState<WebEyeTrackSource | null>(null);
   const wetLoad = useRef<Promise<WebEyeTrackSource | null> | null>(null);
   const startedAt = useRef(new Date().toISOString());
   const pendingSave = useRef<{ report: SessionReport; state: ResumeState | null } | null>(null);
   const [pausing, setPausing] = useState(false);
+  const [saved, setSaved] = useState(savedCalibration);
+  // Calibrate once per account: a saved calibration is always reused (the student can press
+  // Recalibrate), as long as the engine is the default one, the only one that can be saved.
+  // The engine comes from the URL, so it's only known in the browser.
+  const engine = useSyncExternalStore(noSubscribe, gazeEngine, () => null);
+  const savedUsable = !!saved && engine === "mediapipe";
+
+  /** Save a new calibration to the account, replacing the old one (best effort). */
+  function saveToAccount(c: CalibrationResult) {
+    const s = toSaved(c, saved?.secPerWord ?? loadPace()?.secPerWord ?? null);
+    if (!s) return; // this engine's calibration can't be saved
+    setSaved(s);
+    void fetch("/api/calibration", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ calibration: s }) })
+      .then((res) => {
+        if (!res.ok) console.warn("[calibration] not saved", res.status);
+      })
+      .catch((e) => console.warn("[calibration] not saved", e));
+  }
 
   useEffect(() => () => tracker.stop(), [tracker]);
   useEffect(() => () => wet?.dispose(), [wet]); // stops its worker
 
   /** Load WebEyeTrack once. If it fails, fall back to the MediaPipe + ridge pipeline. */
   function loadWet(): Promise<WebEyeTrackSource | null> {
-    // "webeyetrack" and "hybrid" both need it; plain "mediapipe" doesn't.
-    if (gazeEngine() === "mediapipe") return Promise.resolve(null);
+    if (gazeEngine() !== "webeyetrack") return Promise.resolve(null);
     wetLoad.current ??= WebEyeTrackSource.create().catch((e) => {
       console.warn("[webeyetrack] unavailable, using MediaPipe + ridge", e);
       return null;
@@ -82,15 +105,6 @@ export function ReaderApp({
               ? "busy"
               : "error",
       );
-    }
-  }
-
-  // Full screen keeps the page from moving under your eyes. It's optional, so never wait on it.
-  function enterFullscreen() {
-    try {
-      if (!document.fullscreenElement) document.documentElement.requestFullscreen?.().catch(() => {});
-    } catch {
-      /* not supported */
     }
   }
 
@@ -133,6 +147,10 @@ export function ReaderApp({
   }
 
   const lineH = prefs ? lineHeightFor(prefs) : 50;
+  // Calibration and reading require full screen (see fullscreen.tsx). Calibration and the
+  // pace passage are taken down while out of it, so they start again on return.
+  const outOfFullscreen = useOutOfFullscreen();
+  const blocked = outOfFullscreen && (phase === "calibrate" || phase === "readcal" || phase === "reading");
 
   return (
     <>
@@ -163,6 +181,13 @@ export function ReaderApp({
             enterFullscreen();
             setPhase("calibrate");
           }}
+          savedCalibrationAt={savedUsable && saved ? saved.savedAt : null}
+          onUseSaved={() => {
+            if (!saved) return;
+            setPrefs(loadPrefs());
+            enterFullscreen();
+            beginReading("gaze", fromSaved(saved));
+          }}
           onSkipTracking={(m) => {
             setPrefs(loadPrefs());
             enterFullscreen();
@@ -174,7 +199,9 @@ export function ReaderApp({
         />
       )}
 
-      {phase === "calibrate" && (
+      {blocked && <FullscreenGate reading={phase === "reading"} />}
+
+      {phase === "calibrate" && !blocked && (
         <Calibration
           tracker={tracker}
           wet={wet}
@@ -188,13 +215,18 @@ export function ReaderApp({
         />
       )}
 
-      {phase === "readcal" && dotCalibration && prefs && (
+      {phase === "readcal" && dotCalibration && prefs && !blocked && (
         <ReadingCalibration
-          tracker={tracker}
-          calibration={dotCalibration}
           prefs={prefs}
-          onDone={(o) => beginReading("gaze", applyReadingCalibration(dotCalibration, o))}
-          onSkip={() => beginReading("gaze", dotCalibration)}
+          onDone={(o) => {
+            const c = applyReadingCalibration(dotCalibration, o);
+            saveToAccount(c);
+            beginReading("gaze", c);
+          }}
+          onSkip={() => {
+            saveToAccount(dotCalibration);
+            beginReading("gaze", dotCalibration);
+          }}
         />
       )}
 
@@ -210,6 +242,8 @@ export function ReaderApp({
           resume={resume?.state ?? null}
           onFinish={(r) => save(r, null)}
           onPause={(r, st) => save(r, st)}
+          onRecalibrated={saveToAccount}
+          outOfFullscreen={blocked}
         />
       )}
 
@@ -239,3 +273,6 @@ export function ReaderApp({
     </>
   );
 }
+
+/** The gaze engine is fixed for the page's lifetime: nothing to subscribe to. */
+const noSubscribe = () => () => {};

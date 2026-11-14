@@ -130,7 +130,7 @@ export function checkReport(raw: unknown, reading: Reading): { report: SessionRe
   return { report };
 }
 
-/** Check the "pick up where you left off" state saved on Pause. Null when it's unusable. */
+/** Check the "pick up where you left off" state saved by "Save & exit". Null when it's unusable. */
 export function checkResume(raw: unknown, reading: Reading): ResumeState | null {
   const n = countWords(reading.paragraphs);
   if (!isObj(raw) || !Array.isArray(raw.wordDwell) || raw.wordDwell.length !== n) return null;

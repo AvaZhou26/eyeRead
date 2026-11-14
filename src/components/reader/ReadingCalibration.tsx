@@ -1,27 +1,17 @@
 "use client";
-// Calibrate by reading: after the dots, the student reads a short passage laid out exactly
-// like the reader. We learn (1) a vertical gaze correction and the real reading jitter, and
-// (2) their reading pace, so read vs skimmed is judged against how fast *they* read.
-// The maths lives in lib/gaze/readingCalibration.ts.
+// Reading pace: after the dots, the student reads a short passage laid out exactly like the
+// reader, and we time it. That gives *their* normal pace, so read vs skimmed is judged against
+// how fast they read rather than an assumed 240 wpm. It is not used to correct the gaze: a
+// correction learned from one passage could throw the gaze off the page for the rest of the
+// session.
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { FaceTracker } from "@/lib/gaze/faceTracker";
-import {
-  fitReadingCalibration,
-  paceFrom,
-  savePace,
-  withReadingCorrection,
-  type CalibLine,
-  type ReadingFit,
-  type ReadingSample,
-} from "@/lib/gaze/readingCalibration";
+import { PACE_MAX_WPM, paceFrom, savePace } from "@/lib/gaze/readingPace";
 import type { CalibrationResult } from "./Calibration";
 import { FONT_VAR, readerGeometry, type ReaderPrefs } from "./ReaderView";
 
 /**
- * ~200 everyday words: more than fills one reader page at the usual sizes. The passage must
- * cover the WHOLE page height: gaze tends to get squashed toward the bottom of the screen
- * (eyelids cover more of the iris when you look down), and a correction learned only on the
- * top lines can't fix the bottom ones. Words past the page bottom are hidden and not counted.
+ * ~200 everyday words: more than fills one reader page at the usual sizes, so the timing
+ * covers a full page of real reading. Words past the page bottom are hidden and not counted.
  */
 const PASSAGE =
   "Honeybees find their way home by using the sun as a compass. Before a bee leaves the hive, it notes the angle " +
@@ -37,35 +27,21 @@ const PASSAGE =
 const WORDS = PASSAGE.split(/\s+/);
 
 export interface ReadingCalibrationOutcome {
-  fit: ReadingFit | null;
   pace: { wpm: number; secPerWord: number } | null;
 }
 
-/** Fold the reading step's results into the dot calibration's result. */
+/** Add the measured reading pace to the dot calibration's result (the gaze is left as it is). */
 export function applyReadingCalibration(cal: CalibrationResult, o: ReadingCalibrationOutcome): CalibrationResult {
-  const out: CalibrationResult = { ...cal };
-  if (o.fit?.ok) {
-    out.estimator = withReadingCorrection(cal.estimator, o.fit);
-    // Scatter during real reading is what the line model faces; keep the larger estimate.
-    out.validation = { ...cal.validation, jitterDyPx: Math.max(cal.validation.jitterDyPx ?? 0, o.fit.jitterPx) };
-    out.readingFit = o.fit;
-  }
-  if (o.pace) out.secPerWord = o.pace.secPerWord;
-  return out;
+  return o.pace ? { ...cal, secPerWord: o.pace.secPerWord } : cal;
 }
 
 type Phase = "intro" | "reading" | "result";
 
 export function ReadingCalibration({
-  tracker,
-  calibration,
   prefs,
   onDone,
   onSkip,
 }: {
-  tracker: FaceTracker;
-  /** The dot calibration we're refining (its estimator gives the raw gaze). */
-  calibration: CalibrationResult;
   prefs: ReaderPrefs;
   onDone: (o: ReadingCalibrationOutcome) => void;
   onSkip: () => void;
@@ -74,14 +50,9 @@ export function ReadingCalibration({
   const [vp, setVp] = useState({ w: 0, h: 0 });
   const [outcome, setOutcome] = useState<(ReadingCalibrationOutcome & { tooFast: boolean; seconds: number }) | null>(null);
   const textRef = useRef<HTMLDivElement>(null);
-  const lines = useRef<CalibLine[]>([]);
-  const samples = useRef<ReadingSample[]>([]);
   /** Words actually shown (the passage is cut at the bottom of the page). */
   const shownWords = useRef(WORDS.length);
   const startedAt = useRef(0);
-  // Live "can't see your face" warning, same rule and wording as the calibration dots.
-  const lastFaceAt = useRef(0); // set when the passage appears
-  const [faceOk, setFaceOk] = useState(true);
 
   useEffect(() => {
     const upd = () => setVp({ w: window.innerWidth, h: window.innerHeight });
@@ -92,61 +63,27 @@ export function ReadingCalibration({
 
   const g = readerGeometry(vp.w, vp.h, prefs);
 
-  // Once the passage is on screen: find its lines, then start the clock and the recording.
+  // Once the passage is on screen: hide what doesn't fit the page, count the rest, start the clock.
   useLayoutEffect(() => {
     if (phase !== "reading" || !textRef.current) return;
-    const rows: { center: number; words: number; left: number; right: number }[] = [];
     const pageBottom = g.pageTop + g.pageH;
     let shown = 0;
     for (const el of Array.from(textRef.current.querySelectorAll<HTMLElement>("[data-w]"))) {
-      const r = el.getBoundingClientRect();
       // Same page height as the reader: hide whatever doesn't fit.
-      const fits = r.bottom <= pageBottom;
+      const fits = el.getBoundingClientRect().bottom <= pageBottom;
       el.style.visibility = fits ? "" : "hidden";
-      if (!fits) continue;
-      shown++;
-      const c = (r.top + r.bottom) / 2;
-      const row = rows.find((x) => Math.abs(x.center - c) < g.lineH / 2);
-      if (row) {
-        row.words++;
-        row.left = Math.min(row.left, r.left);
-        row.right = Math.max(row.right, r.right);
-      } else rows.push({ center: c, words: 1, left: r.left, right: r.right });
+      if (fits) shown++;
     }
-    lines.current = rows.sort((a, b) => a.center - b.center);
     shownWords.current = shown;
-    samples.current = [];
     startedAt.current = performance.now() / 1000;
-  }, [phase, g.lineH, g.pageTop, g.pageH]);
-
-  useEffect(() => {
-    if (phase !== "reading") return;
-    lastFaceAt.current = performance.now() / 1000; // grace period as the passage appears
-    const id = setInterval(() => setFaceOk(performance.now() / 1000 - lastFaceAt.current < 0.6), 300);
-    const unsub = tracker.subscribe((f) => {
-      if (f.face) lastFaceAt.current = f.t;
-      if (!f.features) return;
-      const p = calibration.estimator.predict(f);
-      if (p) samples.current.push({ t: f.t, x: p.x, y: p.y });
-    });
-    return () => {
-      clearInterval(id);
-      unsub();
-      setFaceOk(true);
-    };
-  }, [phase, tracker, calibration]);
+  }, [phase, g.pageTop, g.pageH]);
 
   function finish() {
     const end = performance.now() / 1000;
     const seconds = end - startedAt.current;
     const pace = paceFrom(shownWords.current, seconds);
-    const tooFast = !pace && shownWords.current / (seconds / 60) > 700;
-    // Leave out the eyes travelling to the first line (from the button you just clicked) and
-    // any look down at the Done button at the end: neither is reading the first/last line,
-    // and they would pull that line's level, and so the whole correction, off.
-    const reading = samples.current.filter((s) => s.t >= startedAt.current + 0.6 && s.t <= end - 0.4);
-    const fit = fitReadingCalibration(reading, lines.current, g.lineH);
-    setOutcome({ fit, pace, tooFast, seconds });
+    const tooFast = !pace && shownWords.current / (seconds / 60) > PACE_MAX_WPM;
+    setOutcome({ pace, tooFast, seconds });
     setPhase("result");
   }
 
@@ -160,13 +97,12 @@ export function ReadingCalibration({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase]);
 
   function accept() {
     if (!outcome) return;
     if (outcome.pace) savePace(outcome.pace.wpm);
-    onDone({ fit: outcome.fit, pace: outcome.pace });
+    onDone({ pace: outcome.pace });
   }
 
   return (
@@ -179,9 +115,8 @@ export function ReadingCalibration({
             <b className="text-fg">Space</b> (or click Done).
           </p>
           <p className="text-muted mt-3 text-sm leading-relaxed">
-            This teaches Read Assist how your eyes move down real lines of text, and how fast <i>you</i> read, so
-            skimming is judged against your own pace. About 45 seconds: the passage fills a whole page, so the
-            tracker learns the bottom lines too.
+            This teaches Read Assist how fast <i>you</i> read, so reading and skimming are judged against your own
+            pace. About 45 seconds.
           </p>
           <div className="mt-6 flex gap-2 justify-end">
             <button className="btn btn-ghost" onClick={onSkip}>
@@ -214,15 +149,6 @@ export function ReadingCalibration({
               </span>
             ))}
           </div>
-          {/* role=status: announced when it appears. Sits in the top margin, above the passage
-              (which starts below the reader's top bar), so it never covers words being read. */}
-          <div role="status" aria-live="polite" className="fixed left-0 right-0 top-3 flex justify-center pointer-events-none">
-            {!faceOk && (
-              <div className="rounded-lg bg-surface px-3 py-1.5 text-sm font-medium text-skip shadow-sm">
-                We can&apos;t see your face. Check the camera and lighting.
-              </div>
-            )}
-          </div>
           <div className="fixed left-0 right-0 bottom-6 flex justify-center">
             <button className="btn btn-primary" onClick={finish}>
               Done (Space)
@@ -244,31 +170,15 @@ export function ReadingCalibration({
           ) : (
             <>
               <h2 className="text-xl font-semibold">Got it</h2>
-              <ul className="mt-3 space-y-2 text-sm leading-relaxed">
-                <li>
-                  {outcome.pace ? (
-                    <>
-                      Your reading pace: <b>{outcome.pace.wpm} words per minute</b>. Reading and skimming will be judged against
-                      it.
-                    </>
-                  ) : (
-                    <span className="text-muted">We couldn&apos;t measure a normal reading pace from that, so we&apos;ll use a typical one.</span>
-                  )}
-                </li>
-                <li>
-                  {outcome.fit?.ok ? (
-                    <>
-                      Your eyes followed the lines: the tracker is adjusted to how you read, with a jitter of about{" "}
-                      <b>{(outcome.fit.jitterPx / g.lineH).toFixed(1)} lines</b>.
-                    </>
-                  ) : (
-                    <span className="text-muted">
-                      We couldn&apos;t follow your eyes line by line{outcome.fit?.reason ? ` (${outcome.fit.reason})` : ""}, so
-                      we&apos;ll keep the dot calibration as it is.
-                    </span>
-                  )}
-                </li>
-              </ul>
+              <p className="mt-3 text-sm leading-relaxed">
+                {outcome.pace ? (
+                  <>
+                    Your reading pace: <b>{outcome.pace.wpm} words per minute</b>. Reading and skimming will be judged against it.
+                  </>
+                ) : (
+                  <span className="text-muted">We couldn&apos;t measure a normal reading pace from that, so we&apos;ll use a typical one.</span>
+                )}
+              </p>
             </>
           )}
           <div className="mt-6 flex flex-wrap gap-2 justify-end">

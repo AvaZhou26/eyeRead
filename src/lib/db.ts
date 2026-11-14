@@ -32,6 +32,9 @@ const WEB_READINGS_SCHEMA = `CREATE TABLE IF NOT EXISTS web_readings (
      id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), url TEXT NOT NULL, title TEXT NOT NULL,
      site TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, imported_at TEXT NOT NULL,
      coverage_pct REAL NOT NULL, active_sec REAL NOT NULL, data TEXT NOT NULL, UNIQUE (user_id, url))`;
+// Each student's saved eye-tracking calibration (see lib/gaze/savedCalibration.ts), as JSON.
+const CALIBRATIONS_SCHEMA = `CREATE TABLE IF NOT EXISTS calibrations (
+     user_id TEXT PRIMARY KEY REFERENCES users(id), data TEXT NOT NULL, updated_at TEXT NOT NULL)`;
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS users (
@@ -60,6 +63,7 @@ const SCHEMA = [
      reading_id TEXT PRIMARY KEY REFERENCES readings(id), text TEXT NOT NULL, generated_by TEXT NOT NULL,
      created_at TEXT NOT NULL, based_on_sessions INTEGER NOT NULL)`,
   WEB_READINGS_SCHEMA,
+  CALIBRATIONS_SCHEMA,
 ];
 
 const g = globalThis as unknown as { __raClient?: Client; __raReady?: Promise<void> };
@@ -545,4 +549,32 @@ export async function upsertWebReadings(userId: string, items: Omit<WebReading, 
 export async function deleteWebReading(id: string, userId: string): Promise<boolean> {
   const r = await (await webDb()).execute({ sql: "DELETE FROM web_readings WHERE id = ? AND user_id = ?", args: [id, userId] });
   return r.rowsAffected > 0;
+}
+
+// ---------- saved eye-tracking calibrations ----------
+let calibrationTableReady: Promise<unknown> | null = null;
+// Databases created before this table existed get it on first use.
+async function calibrationDb(): Promise<Client> {
+  const c = await db();
+  calibrationTableReady ??= c.execute(CALIBRATIONS_SCHEMA).catch((e) => {
+    calibrationTableReady = null;
+    throw e;
+  });
+  await calibrationTableReady;
+  return c;
+}
+
+/** The student's saved calibration, as stored (check it with parseSavedCalibration), or null. */
+export async function getCalibration(userId: string): Promise<unknown> {
+  const { rows } = await (await calibrationDb()).execute({ sql: "SELECT data FROM calibrations WHERE user_id = ?", args: [userId] });
+  return rows[0] ? json<unknown>(rows[0].data, null) : null;
+}
+
+/** Save (or replace) the student's calibration. */
+export async function saveCalibration(userId: string, data: unknown) {
+  await (await calibrationDb()).execute({
+    sql: `INSERT INTO calibrations (user_id, data, updated_at) VALUES (?, ?, ?)
+          ON CONFLICT (user_id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`,
+    args: [userId, JSON.stringify(data), new Date().toISOString()],
+  });
 }
