@@ -5,12 +5,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { FaceFrame, FaceTracker } from "@/lib/gaze/faceTracker";
 import { GazeModel, validate, type CalibSample, type ValidationResult } from "@/lib/gaze/gazeModel";
 import { OneEuroFilter } from "@/lib/gaze/oneEuro";
-import type { GazeEngine, GazeEstimator, WebEyeTrackSource, WetCalibSample } from "@/lib/gaze/webEyeTrackSource";
+import type { ReadingFit } from "@/lib/gaze/readingCalibration";
+import { WET_MAX_AGE_S, type GazeEngine, type GazeEstimator, type WebEyeTrackSource, type WetCalibSample } from "@/lib/gaze/webEyeTrackSource";
 
 export interface CalibrationResult {
   engine: GazeEngine;
   estimator: GazeEstimator;
   validation: ValidationResult;
+  /** From the reading step (ReadingCalibration), when it was done and could follow the lines. */
+  readingFit?: ReadingFit;
+  /** The student's own reading pace from the reading step (seconds per word). */
+  secPerWord?: number;
 }
 
 /** Ridge model as a frame → screen estimator. */
@@ -85,7 +90,9 @@ export function Calibration({
           if (g) c.into.push({ features: [g.x, g.y], x: c.x, y: c.y, point: c.point });
         } else {
           const l = wet.latest;
-          if (l && l.seq !== lastWetSeq.current && f.t - l.t < 0.2) {
+          // l.t >= c.from: the result must come from a frame after the click (results now
+          // arrive from the worker a frame or two late).
+          if (l && l.seq !== lastWetSeq.current && l.t >= c.from && f.t - l.t < WET_MAX_AGE_S) {
             lastWetSeq.current = l.seq;
             c.into.push({ features: f.features, x: c.x, y: c.y, point: c.point });
             const { eyePatch, headVector, faceOrigin3D } = l.out;
@@ -138,9 +145,14 @@ export function Calibration({
       try {
         const byPoint = new Map<number, WetCalibSample[]>();
         for (const s of wetSamples.current) byPoint.set(s.point, [...(byPoint.get(s.point) ?? []), s]);
-        // Up to 4 frames per dot: eye patches are large tensors, and adapt() trains on all of them.
+        // Up to 4 frames per dot (eye patches are large tensors), 1 fine-tune step (the library
+        // default). 8 frames and 3 steps were tried (2026-11-14): no difference to accuracy,
+        // only a longer wait.
         const support = [...byPoint.values()].flatMap((ss) => pickEvenly(ss, 4));
-        wet.reset();
+        // adapt() trains the CNN for a few seconds (longer the first time, while WebGL compiles
+        // its training shaders). It runs in a worker, but let the "Tuning…" card paint first.
+        await nextPaint();
+        void wet.reset(); // the worker runs this before the adapt() below
         await wet.adapt(support);
         setIdx(0);
         setPhase("validate");
@@ -303,6 +315,7 @@ function ResultBody({
     },
   }[q];
   const lines = result.validation.meanAbsDyPx / lineHeight;
+  const jitter = (result.validation.jitterDyPx ?? 0) / lineHeight;
   return (
     <>
       <div className="flex items-center gap-3">
@@ -310,7 +323,7 @@ function ResultBody({
           {meta.label}
         </span>
         <span className="text-sm text-muted">
-          off by ~{Math.round(result.validation.meanErrorPx)}px (≈{lines.toFixed(1)} lines vertically)
+          off by ~{Math.round(result.validation.meanErrorPx)}px (≈{lines.toFixed(1)} lines vertically) · jitter ≈{jitter.toFixed(1)} lines
         </span>
       </div>
       <h2 className="text-xl font-semibold mt-3">Calibration complete</h2>
@@ -368,6 +381,11 @@ function Dot({ at, onClick, shrinking, clickable }: { at: { x: number; y: number
       <span className="absolute h-1.5 w-1.5 rounded-full" style={{ background: "var(--accent-fg)" }} />
     </button>
   );
+}
+
+/** Resolves after the browser has painted the current frame (rAF fires before paint, so wait two). */
+function nextPaint(): Promise<void> {
+  return new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
 }
 
 /** Evenly pick up to n items. */

@@ -90,6 +90,7 @@ export function normalizeReport(raw: unknown): SessionReport {
     coveragePct: num(o.coveragePct, 0, 0, 100),
     wordsRead: Math.round(num(o.wordsRead)),
     avgWpm: numOrNull(o.avgWpm, 0, 5000),
+    baselineWpm: numOrNull(o.baselineWpm, 0, 5000),
     calibrationQuality: QUALITIES.includes(o.calibrationQuality as SessionReport["calibrationQuality"])
       ? (o.calibrationQuality as SessionReport["calibrationQuality"])
       : "attention-only",

@@ -14,6 +14,24 @@ export interface FaceFrame {
   faceX: number; // 0..1 horizontal face position in the image
   faceY: number;
   brightness: number | null; // 0..255 average image brightness (sampled ~1/sec)
+  /** Average eye width (corner to corner) in camera pixels: how much detail the tracker gets. */
+  eyePx: number;
+  /** Around the eyes, sampled ~2/sec (null until sampled or with no face). */
+  eyes: EyeLight | null;
+}
+
+export interface EyeLight {
+  /** 0..255 average brightness around the eyes (your face's lighting, not the room's). */
+  luma: number;
+  /** 0..1 share of near-white pixels around the eyes: glare (usually reflections on glasses). */
+  glare: number;
+}
+
+interface Box {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 // MediaPipe landmark indices
@@ -65,6 +83,8 @@ export class FaceTracker {
   private smooth: number[] | null = null;
   private frameCount = 0;
   private lastBrightness: number | null = null;
+  private eyeBoxes: [Box, Box] | null = null;
+  private lastEyes: EyeLight | null = null;
   private canvas: HTMLCanvasElement | null = null;
   private lastFrameAt = 0;
   private lastTimestamp = 0;
@@ -153,14 +173,18 @@ export class FaceTracker {
     } catch {
       frame = this.empty(nowMs / 1000);
     }
-    if (this.frameCount++ % 30 === 0) this.lastBrightness = this.sampleBrightness(video);
+    if (this.frameCount % 30 === 0) this.lastBrightness = this.sampleBrightness(video);
+    if (!frame.face) this.lastEyes = null;
+    else if (this.frameCount % 15 === 0 && this.eyeBoxes) this.lastEyes = this.sampleEyes(video, this.eyeBoxes);
+    this.frameCount++;
     frame.brightness = this.lastBrightness;
+    frame.eyes = this.lastEyes;
     if (res) for (const fn of this.rawListeners) fn(res, video, frame);
     for (const fn of this.listeners) fn(frame);
   };
 
   private empty(t: number): FaceFrame {
-    return { t, face: false, blink: false, features: null, yaw: 0, pitch: 0, faceSize: 0, faceX: 0.5, faceY: 0.5, brightness: null };
+    return { t, face: false, blink: false, features: null, yaw: 0, pitch: 0, faceSize: 0, faceX: 0.5, faceY: 0.5, brightness: null, eyePx: 0, eyes: null };
   }
 
   private extract(lm: NormalizedLandmark[], matrix: number[] | undefined, video: HTMLVideoElement, t: number): FaceFrame {
@@ -192,6 +216,16 @@ export class FaceTracker {
     };
     const A = eye(EYE_A, irisA);
     const B = eye(EYE_B, irisB);
+
+    // Region around each eye (a bit wider than the eye, and tall enough to cover the lens
+    // area right over it), for the glare / face-lighting check in Setup.
+    const box = (e: typeof EYE_A, w: number): Box => {
+      const pts = [P(e.c1), P(e.c2), P(e.top), P(e.bottom)];
+      const x0 = Math.min(...pts.map((q) => q.x)) - 0.15 * w, x1 = Math.max(...pts.map((q) => q.x)) + 0.15 * w;
+      const y0 = Math.min(...pts.map((q) => q.y)) - 0.3 * w, y1 = Math.max(...pts.map((q) => q.y)) + 0.3 * w;
+      return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+    };
+    this.eyeBoxes = [box(EYE_A, A.w), box(EYE_B, B.w)];
 
     // Head pose from the 4×4 facial transformation matrix (column-major).
     let fx = 0, fy = 0, tx = 0, ty = 0, tz = 0;
@@ -234,8 +268,36 @@ export class FaceTracker {
       faceX: nose.x / W,
       faceY: nose.y / H,
       brightness: null,
+      eyePx: (A.w + B.w) / 2,
+      eyes: null,
     };
   }
+
+  /** Brightness and glare around both eyes, from small downscaled crops of the video. */
+  private sampleEyes(video: HTMLVideoElement, boxes: [Box, Box]): EyeLight | null {
+    try {
+      this.eyeCanvas ??= document.createElement("canvas");
+      const c = this.eyeCanvas;
+      const SW = 40, SH = 20; // per eye
+      c.width = SW * 2;
+      c.height = SH;
+      const ctx = c.getContext("2d", { willReadFrequently: true });
+      if (!ctx) return null;
+      boxes.forEach((b, i) => ctx.drawImage(video, b.x, b.y, b.w, b.h, i * SW, 0, SW, SH));
+      const px = ctx.getImageData(0, 0, SW * 2, SH).data;
+      let sum = 0, bright = 0;
+      for (let i = 0; i < px.length; i += 4) {
+        const l = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+        sum += l;
+        if (l >= 245) bright++;
+      }
+      const n = px.length / 4;
+      return { luma: sum / n, glare: bright / n };
+    } catch {
+      return null;
+    }
+  }
+  private eyeCanvas: HTMLCanvasElement | null = null;
 
   private sampleBrightness(video: HTMLVideoElement): number | null {
     try {

@@ -24,7 +24,12 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             safe to tell React to accept whatever it finds here. */}
         <script suppressHydrationWarning dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>
-      <body className="min-h-full flex flex-col">{children}</body>
+      {/* Extensions like Grammarly or custom-cursor tools add attributes to <body> before React
+          hydrates. suppressHydrationWarning only ignores attribute mismatches on this one element,
+          not its children. */}
+      <body className="min-h-full flex flex-col" suppressHydrationWarning>
+        {children}
+      </body>
     </html>
   );
 }

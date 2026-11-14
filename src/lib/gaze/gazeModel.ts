@@ -98,7 +98,24 @@ export interface ValidationResult {
   meanErrorPx: number;
   meanAbsDyPx: number;
   meanDyPx: number; // signed: positive = predictions land below the target
+  /**
+   * Typical vertical error of a single reading (median |dy|), after removing the constant
+   * offset the reader corrects by itself. This is what decides whether line tracking works:
+   * the per-dot averages above smooth it away. Optional: older saved results lack it.
+   */
+  jitterDyPx?: number;
   quality: "good" | "fair" | "poor";
+}
+
+/**
+ * How much vertical scatter the reader's line model should expect (px). Uses the per-reading
+ * jitter when known (×1.5: median |error| → standard deviation), never less than the old
+ * averaged-error rule, and clamped to a sane range.
+ */
+export function sigmaYFor(v: ValidationResult, lineH: number): number {
+  const fromAvg = v.meanAbsDyPx * 1.3;
+  const fromJitter = (v.jitterDyPx ?? 0) * 1.5;
+  return Math.min(lineH * 5, Math.max(lineH * 0.7, fromAvg, fromJitter));
 }
 
 /** Compare predictions to known dot positions the user looked at. */
@@ -123,7 +140,18 @@ export function validate(model: Pick<GazeModel, "predict">, samples: CalibSample
   const n = Math.max(1, byPoint.size);
   const meanErrorPx = err / n;
   const meanAbsDyPx = absDy / n;
+  const meanDyPx = dy / n;
+  // Per-reading vertical error, minus the constant offset (the reader learns that offset).
+  const jitterDyPx = samples.length ? median(samples.map((s) => Math.abs(model.predict(s.features).y - s.y - meanDyPx))) : 0;
   const lines = meanAbsDyPx / lineHeightPx;
-  const quality = meanErrorPx < 140 && lines < 2.2 ? "good" : meanErrorPx < 260 && lines < 4.5 ? "fair" : "poor";
-  return { meanErrorPx, meanAbsDyPx, meanDyPx: dy / n, quality };
+  const jitterLines = jitterDyPx / lineHeightPx;
+  // "good" must also mean single readings usually land within ~1 line, or the reader can't
+  // tell lines apart, however good the averages look. Jitter thresholds are first guesses.
+  const quality =
+    meanErrorPx < 140 && lines < 2.2 && jitterLines < 1.2
+      ? "good"
+      : meanErrorPx < 260 && lines < 4.5 && jitterLines < 2.5
+        ? "fair"
+        : "poor";
+  return { meanErrorPx, meanAbsDyPx, meanDyPx, jitterDyPx, quality };
 }

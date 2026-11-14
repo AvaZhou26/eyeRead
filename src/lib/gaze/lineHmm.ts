@@ -37,6 +37,15 @@ export class LineHmm {
   /** posterior over [line 0..N-1, OFF] */
   p: Float64Array = new Float64Array(1);
   biasY = 0;
+  /**
+   * Limits on the drift correction. Defaults (null / BIAS_TAU) suit a dot-only calibration,
+   * where this offset is the main fix for a misaligned calibration. After the reading
+   * calibration the offset is already right, so the reader tightens these: a free offset can
+   * lock onto a wrong line (it's learned against the line it currently believes, which it
+   * picked using that same offset), and a big one makes things worse, not better.
+   */
+  biasCap: number | null = null;
+  biasTau = BIAS_TAU;
 
   constructor(
     public sigmaY: number,
@@ -164,9 +173,9 @@ export class LineHmm {
     if (b.index < 0 || b.prob < BIAS_MIN_PROB) return;
     const L = this.lines[b.index];
     const resid = obs.y - (L.top + L.bottom) / 2;
-    const alpha = Math.min(1, dt / BIAS_TAU);
+    const alpha = Math.min(1, dt / this.biasTau);
     this.biasY += alpha * (resid - this.biasY);
-    const cap = Math.max(lineHeight * 3, this.sigmaY * 1.5);
+    const cap = this.biasCap ?? Math.max(lineHeight * 3, this.sigmaY * 1.5);
     this.biasY = Math.max(-cap, Math.min(cap, this.biasY));
   }
 

@@ -7,10 +7,12 @@ import { gazeEngine, WebEyeTrackSource } from "@/lib/gaze/webEyeTrackSource";
 import type { TrackingMode } from "@/lib/gaze/readingTracker";
 import type { ResumeState, SessionReport } from "@/lib/types";
 import { Calibration, type CalibrationResult } from "./Calibration";
+import { applyReadingCalibration, ReadingCalibration } from "./ReadingCalibration";
 import { ReaderView, lineHeightFor, loadPrefs, type ReaderPrefs } from "./ReaderView";
 import { Setup, type CameraState } from "./Setup";
 
-type Phase = "setup" | "calibrate" | "reading" | "saving";
+// calibrate = the dots; readcal = calibrate by reading (vertical fit + personal reading pace)
+type Phase = "setup" | "calibrate" | "readcal" | "reading" | "saving";
 
 export function ReaderApp({
   readingId,
@@ -31,6 +33,8 @@ export function ReaderApp({
   const [cameraState, setCameraState] = useState<CameraState>("off");
   const [mode, setMode] = useState<TrackingMode>("gaze");
   const [calibration, setCalibration] = useState<CalibrationResult | null>(null);
+  /** Dot calibration result, waiting for the reading step to refine it. */
+  const [dotCalibration, setDotCalibration] = useState<CalibrationResult | null>(null);
   const [prefs, setPrefs] = useState<ReaderPrefs | null>(null);
   const [saveError, setSaveError] = useState("");
   const [video, setVideo] = useState<HTMLVideoElement | null>(null);
@@ -43,7 +47,7 @@ export function ReaderApp({
   const [pausing, setPausing] = useState(false);
 
   useEffect(() => () => tracker.stop(), [tracker]);
-  useEffect(() => () => wet?.detach(), [wet]);
+  useEffect(() => () => wet?.dispose(), [wet]); // stops its worker
 
   /** Load WebEyeTrack once. If it fails, fall back to the MediaPipe + ridge pipeline. */
   function loadWet(): Promise<WebEyeTrackSource | null> {
@@ -132,7 +136,10 @@ export function ReaderApp({
     <>
       {/* The camera feed lives here for the whole session (hidden; the tracker reads it). */}
       {/* aria-hidden: an empty <video> otherwise announces "Unable to play media" to screen readers. */}
+      {/* suppressHydrationWarning: video extensions (speed controllers, PiP tools) tag every
+          <video> with attributes like data-video="0" before React hydrates. Attributes only. */}
       <video
+        suppressHydrationWarning
         ref={setVideo}
         aria-hidden="true"
         tabIndex={-1}
@@ -172,7 +179,20 @@ export function ReaderApp({
           lineHeight={lineH}
           onCancel={() => setPhase("setup")}
           onAttentionOnly={() => beginReading("attention", null)}
-          onDone={(r) => beginReading("gaze", r)}
+          onDone={(r) => {
+            setDotCalibration(r);
+            setPhase("readcal");
+          }}
+        />
+      )}
+
+      {phase === "readcal" && dotCalibration && prefs && (
+        <ReadingCalibration
+          tracker={tracker}
+          calibration={dotCalibration}
+          prefs={prefs}
+          onDone={(o) => beginReading("gaze", applyReadingCalibration(dotCalibration, o))}
+          onSkip={() => beginReading("gaze", dotCalibration)}
         />
       )}
 

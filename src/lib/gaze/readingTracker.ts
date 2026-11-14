@@ -19,10 +19,14 @@ import type {
 
 export type TrackingMode = "gaze" | "attention" | "none";
 
-/** Seconds a typical college reader spends per word (≈240 wpm). */
+/** Seconds a typical college reader spends per word (≈240 wpm). Used when we don't know the student's own pace. */
 export const SEC_PER_WORD = 60 / 240;
+// Both ratios are relative to the reader's normal time per word (their own pace when known,
+// from the reading calibration; else SEC_PER_WORD). At 240 wpm that means:
 const READ_RATIO = 0.35; // ≥35% of normal time on a word → read  (i.e. faster than ~690 wpm is not "reading")
 const SKIM_RATIO = 0.15; // 15–35% → skimmed (~700–1600 wpm); below → skipped
+/** "Skimming" state: moving down lines this many times faster than your normal pace. */
+const SKIM_SPEEDUP = 2.75; // at 240 wpm and ~11 words a line ≈ 1 line/s, the old fixed threshold
 
 export interface MarkerInfo {
   line: LineBox;
@@ -56,7 +60,24 @@ interface Options {
   sigmaY: number;
   initialBiasY: number;
   aids: boolean;
+  /** This student's normal seconds per word (from the reading calibration); default SEC_PER_WORD. */
+  secPerWord?: number;
+  /**
+   * The gaze is already aligned to real lines of text (the reading calibration succeeded):
+   * keep the reader's own offset correction to drift-sized amounts.
+   */
+  alignedByReading?: boolean;
 }
+
+/**
+ * With a reading-aligned calibration: max drift correction (lines) and its time constant (s).
+ * Picked in a simulation of 3 pages read line by line (gaze jitter 1–2.5 lines, a glance
+ * around each new page, slow drift of 1–2 lines): 2 lines / 4 s kept the right line 87–98% of
+ * the time. Slower adaptation (8–20 s) lost the drift cases (65–76% at 2 lines of drift); the
+ * cap mattered little once page-start anchoring ignored the glance.
+ */
+const ALIGNED_BIAS_CAP_LINES = 2;
+const ALIGNED_BIAS_TAU = 4;
 
 export class ReadingTracker {
   readonly wordDwell: Float64Array;
@@ -90,10 +111,12 @@ export class ReadingTracker {
   private regressionActive = false;
   private regressions: { from: number; to: number }[] = []; // word ranges re-read
 
-  // page-start anchoring: right after a page turn people read the first line, so the
-  // gaze offset during that time tells us the calibration drift directly.
+  // page-start anchoring: after a page turn people read the first line, so the gaze offset
+  // while they do tells us the calibration drift directly. But the first moments on a new page
+  // are often a glance around it, so we only trust the second just before the first return
+  // sweep: to sweep back to the start of line 2 you must have just been reading line 1.
   private anchoring = false;
-  private anchorResid: number[] = [];
+  private anchorResid: { t: number; r: number }[] = [];
 
   // place marker
   private place = -1; // page-local line index of where you're reading
@@ -118,6 +141,7 @@ export class ReadingTracker {
     this.wordRereads = new Int32Array(opts.totalWords);
     this.hmm = new LineHmm(opts.sigmaY, Math.max(60, opts.sigmaY));
     this.hmm.biasY = opts.initialBiasY;
+    this.applyBiasLimits();
     this.t0 = now;
     this.segStart = 0;
     this.pageStart = now;
@@ -127,19 +151,37 @@ export class ReadingTracker {
     return this.opts.mode;
   }
 
+  /** Normal seconds per word for this reader: their own pace if measured, else typical. */
+  private get spw() {
+    return this.opts.secPerWord ?? SEC_PER_WORD;
+  }
+
   setAids(on: boolean) {
     this.opts.aids = on;
     if (!on) this.setMarker(null);
   }
 
+  private applyBiasLimits() {
+    const aligned = !!this.opts.alignedByReading;
+    this.hmm.biasCap = aligned ? ALIGNED_BIAS_CAP_LINES * this.opts.lineHeight : null;
+    this.hmm.biasTau = aligned ? ALIGNED_BIAS_TAU : 4;
+  }
+
+  /** Largest offset the reader may apply (also caps the page-start anchoring). */
+  private biasCap() {
+    return this.hmm.biasCap ?? Math.max(this.opts.lineHeight * 4, this.opts.sigmaY * 2);
+  }
+
   /** Re-tune after a recalibration. */
-  retune(sigmaY: number, biasY: number, mode: TrackingMode) {
+  retune(sigmaY: number, biasY: number, mode: TrackingMode, alignedByReading = false) {
     // Switching from focus-only to eye tracking mid-session: we don't know the line yet.
     if (mode === "gaze" && this.opts.mode !== "gaze") this.hmm.setLines(this.lines, "spread");
     this.opts.mode = mode;
     this.opts.sigmaY = sigmaY;
+    this.opts.alignedByReading = alignedByReading;
     this.hmm.sigmaY = sigmaY;
     this.hmm.biasY = biasY;
+    this.applyBiasLimits();
   }
 
   /** Called when the page changes (or the layout is rebuilt). */
@@ -173,7 +215,7 @@ export class ReadingTracker {
   private lineRatio(l: LineBox) {
     let d = 0;
     for (let w = l.firstWord; w <= l.lastWord; w++) d += this.wordDwell[w];
-    return d / (this.wordsIn(l) * SEC_PER_WORD);
+    return d / (this.wordsIn(l) * this.spw);
   }
 
   private checkRushedPage(lines: LineBox[], page: number, now: number) {
@@ -276,15 +318,20 @@ export class ReadingTracker {
       // Still on the first line of a fresh page: learn the offset, keep the model pinned.
       if (gaze && frame?.features && inst !== "away") {
         const first = lines[0];
-        this.anchorResid.push(gaze.y - (first.top + first.bottom) / 2);
+        this.anchorResid.push({ t: now, r: gaze.y - (first.top + first.bottom) / 2 });
       }
-      const enough = this.anchorResid.length >= 20;
-      if (sweep || this.anchorResid.length >= 90 || inst === "away") {
-        if (enough) {
-          const sorted = [...this.anchorResid].sort((a, b) => a - b);
+      // Give up after ~6 s without a sweep (or on looking away): then we learn nothing.
+      const timedOut = this.anchorResid.length >= 180 || inst === "away";
+      if (sweep || timedOut) {
+        // Only the last stretch of line 1, before the sweep's own movement.
+        const onLine1 = sweep ? this.anchorResid.filter((a) => now - a.t <= 1.2 && now - a.t >= 0.25).map((a) => a.r) : [];
+        if (onLine1.length >= 12) {
+          const sorted = onLine1.sort((a, b) => a - b);
           const med = sorted[sorted.length >> 1];
-          const cap = Math.max(lineH * 4, this.opts.sigmaY * 2);
-          this.hmm.biasY = Math.max(-cap, Math.min(cap, med));
+          const cap = this.biasCap();
+          // Reading-aligned: the offset is already known, so only nudge it halfway.
+          const target = this.opts.alignedByReading ? this.hmm.biasY + 0.5 * (med - this.hmm.biasY) : med;
+          this.hmm.biasY = Math.max(-cap, Math.min(cap, target));
         }
         this.anchoring = false;
         this.hmm.pin(0);
@@ -366,7 +413,13 @@ export class ReadingTracker {
     }
     const sweeps5 = this.sweepTimes.filter((s) => t - s <= 5).length;
     const sweeps12 = this.sweepTimes.filter((s) => t - s <= 12).length;
-    if (advance > 1.0 || sweeps5 >= 4) return "skimming";
+    // Your normal pace in lines per second on this page, then "much faster than that" = skimming.
+    const lines = this.lines;
+    const wordsPerLine = lines.length ? lines.reduce((s, l) => s + this.wordsIn(l), 0) / lines.length : 11;
+    const skimAdvance = Math.max(0.4, SKIM_SPEEDUP / (wordsPerLine * this.spw));
+    // Return sweeps: 4 in 5 s at 240 wpm; scaled to your pace (a fast reader sweeps more often).
+    const skimSweeps = Math.max(3, Math.round((4 * SEC_PER_WORD) / this.spw));
+    if (advance > skimAdvance || sweeps5 >= skimSweeps) return "skimming";
     if (sweeps12 === 0 && t - (this.pageStart - this.t0) > 12) return "pausing";
     return "reading";
   }
@@ -549,7 +602,7 @@ export class ReadingTracker {
     const { totalWords, wordParagraph, paragraphWords } = this.opts;
     const wordStatus: CoverageStatus[] = new Array(totalWords);
     for (let w = 0; w < totalWords; w++) {
-      const r = this.wordDwell[w] / SEC_PER_WORD;
+      const r = this.wordDwell[w] / this.spw;
       wordStatus[w] = r >= READ_RATIO ? "read" : r >= SKIM_RATIO ? "skimmed" : "skipped";
     }
 
@@ -559,7 +612,7 @@ export class ReadingTracker {
       status: "skipped" as CoverageStatus,
       coverage: 0,
       dwellSec: 0,
-      expectedSec: words * SEC_PER_WORD,
+      expectedSec: words * this.spw,
       rereads: 0,
       wpm: null,
     }));
@@ -622,6 +675,7 @@ export class ReadingTracker {
       coveragePct: totalWords ? Math.round(((readWords + 0.5 * skimWords) / totalWords) * 1000) / 10 : 0,
       wordsRead: Math.round(readWords + 0.5 * skimWords),
       avgWpm,
+      baselineWpm: this.opts.secPerWord ? Math.round(60 / this.opts.secPerWord) : null,
       calibrationQuality: calibration.quality,
       calibrationErrorPx: calibration.errorPx,
       paragraphs: paraStats,
