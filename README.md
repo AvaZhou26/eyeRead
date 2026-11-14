@@ -2,9 +2,43 @@
 
 A reading coach that uses your laptop webcam to follow your reading line by line. It tells you what you read, skimmed or skipped, and uses Google Gemini to summarize anything you missed.
 
-Students read assigned (or their own) readings in a calm, distraction-free reader. Professors see class-wide maps of which passages were skipped or re-read.
+Students read assigned (or their own) readings in a calm, distraction-free reader. Teachers create courses, assign readings, see class-wide maps of which passages were skipped or re-read, and get lesson plans built from that.
 
 > Hackathon demo. Accounts use an email and password (the two demo accounts sign in with one click), and data lives in a SQLite file, `data/read-assist.db`. Camera video never leaves the browser: only "which words were read" is saved. Reports are measured in the student's browser, so treat them as a study aid, not as proof of reading.
+
+---
+
+## Teammates: get it running from GitHub (about 10 minutes)
+
+**You need:** a Mac or PC with a webcam, Google Chrome, and access to the GitHub repo (ask Jeffrey to add you under the repo's **Settings → Collaborators**).
+
+1. **Install Node.js** (first time only): download the **LTS** version from https://nodejs.org and install it. Check it worked in Terminal: `node -v` should print v20 or newer.
+2. **Get the code**, either way works:
+   - **GitHub Desktop:** File → Clone repository → pick `JeffreyW24/read-assist` → Clone.
+   - **Terminal:** `git clone https://github.com/JeffreyW24/read-assist.git` (the repo is private, so this asks you to sign in; GitHub Desktop is easier)
+3. **Open a terminal in that folder.** In GitHub Desktop: Repository → Open in Terminal. Or `cd` into the folder you cloned.
+4. **Install** (first time only, and again whenever `package.json` changes after a pull):
+   ```bash
+   npm install
+   ```
+   This also downloads the eye-tracking model (about 4 MB).
+5. **Optional, for AI summaries/quizzes/lesson plans:** make your own settings file:
+   ```bash
+   cp .env.example .env.local
+   ```
+   Then put a Gemini key in it (free at https://aistudio.google.com/apikey). Never commit this file: it's ignored on purpose. Skip this step and everything still works with simpler non-AI versions.
+6. **Start it:**
+   ```bash
+   npm run dev
+   ```
+   Wait for `Ready`, then open **http://localhost:3000** in Chrome.
+7. **Sign in:** click a demo button (**Prof. Rivera** = teacher, **Sam Student** = student), or create your own account. The demo teacher's course has join code **READ01**.
+8. Follow **TESTING.md** for the full test checklist.
+
+Good to know:
+- Your copy has **its own empty database**. You won't see Jeffrey's test data, and yours stays on your laptop. Delete `data/read-assist.db` to start fresh.
+- Getting the latest changes: GitHub Desktop → **Fetch origin** → **Pull**, then `npm install`, then restart `npm run dev`.
+- The camera only works at `http://localhost:3000` (or an `https` site), and only in one tab at a time. Close Zoom/FaceTime if it says the camera is busy.
 
 ---
 
@@ -29,7 +63,7 @@ This also downloads the eye-tracking model into `public/mediapipe/`.
 ### 3. Add your Gemini API key (optional but recommended)
 
 1. Get a key at https://aistudio.google.com/apikey
-2. Open the file `.env.local` in this folder (it's hidden in Finder; open it from your editor).
+2. If there's no `.env.local` file yet, create it with `cp .env.example .env.local`. Then open `.env.local` (it's hidden in Finder; open it from your editor).
 3. Replace `your-key-here` with your key, so the line reads `GEMINI_API_KEY=AIza...`
 4. Save. If the app is already running, stop it (Ctrl + C) and start it again.
 
