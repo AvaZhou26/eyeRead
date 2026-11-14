@@ -10,6 +10,7 @@ import { createClient, type Client, type InStatement, type Row } from "@libsql/c
 import type { ClassDigest, Course, LessonPlan, Reading, ResumeState, Session, SessionStatus, User } from "./types";
 import { countWords, toParagraphs } from "./text";
 import { SAMPLE_TEXT, SAMPLE_TITLE } from "./sample";
+import { normalizeReport } from "./validate";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const LEGACY_JSON = path.join(DATA_DIR, "db.json");
@@ -111,7 +112,7 @@ function toSession(r: Row, withResume = false): Session {
   return {
     id: String(r.id), readingId: String(r.reading_id), userId: String(r.user_id), startedAt: String(r.started_at),
     endedAt: String(r.ended_at), status: (r.status as SessionStatus) ?? "done", sittings: Number(r.sittings ?? 1),
-    report: json(r.report, null as unknown as Session["report"]), ai: json(r.ai, null), recall: json(r.recall, undefined),
+    report: normalizeReport(json<unknown>(r.report, null)), ai: json(r.ai, null), recall: json(r.recall, undefined),
     resume: withResume ? json<ResumeState | null>(r.resume, null) : undefined,
   };
 }

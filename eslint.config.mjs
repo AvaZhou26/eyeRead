@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Vendored or generated files (copied in by scripts/setup-vision.mjs and extension/build.mjs):
+    "public/**",
+    "extension/dist/**",
+    "extension/mediapipe/**",
   ]),
 ]);
 

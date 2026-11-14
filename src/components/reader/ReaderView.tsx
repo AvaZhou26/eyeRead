@@ -315,6 +315,12 @@ export function ReaderView({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Esc closes whichever panel is open (settings, or the finish confirmation).
+      if (e.key === "Escape" && (settingsOpen || confirmFinish)) {
+        setSettingsOpen(false);
+        setConfirmFinish(false);
+        return;
+      }
       if (settingsOpen || confirmFinish || recalibrating) return;
       if ((e.target as HTMLElement)?.tagName === "INPUT") return;
       if (["ArrowRight", "PageDown", " "].includes(e.key)) {

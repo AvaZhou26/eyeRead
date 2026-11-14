@@ -1,8 +1,11 @@
 import { hashPassword, startSession } from "@/lib/auth";
 import { createUser, getUserByEmail } from "@/lib/db";
+import { readJsonBody, strField } from "@/lib/validate";
 
 export async function POST(req: Request) {
-  const { name, email, password, role } = (await req.json()) as { name?: string; email?: string; password?: string; role?: string };
+  const body = await readJsonBody(req);
+  if (!body) return Response.json({ error: "That request wasn't understood. Reload the page and try again." }, { status: 400 });
+  const [name, email, password, role] = ["name", "email", "password", "role"].map((k) => strField(body, k));
   if (!name?.trim()) return Response.json({ error: "Enter your name." }, { status: 400 });
   if (!email || !/^\S+@\S+\.\S+$/.test(email.trim())) return Response.json({ error: "Enter a valid email." }, { status: 400 });
   if (!password || password.length < 8) return Response.json({ error: "Use a password of at least 8 characters." }, { status: 400 });

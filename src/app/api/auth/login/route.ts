@@ -1,8 +1,12 @@
 import { checkPassword, startSession } from "@/lib/auth";
 import { getUserByEmail } from "@/lib/db";
+import { readJsonBody, strField } from "@/lib/validate";
 
 export async function POST(req: Request) {
-  const { email, password } = (await req.json()) as { email?: string; password?: string };
+  const body = await readJsonBody(req);
+  if (!body) return Response.json({ error: "That request wasn't understood. Reload the page and try again." }, { status: 400 });
+  const email = strField(body, "email");
+  const password = strField(body, "password");
   if (!email?.trim()) return Response.json({ error: "Enter your email." }, { status: 400 });
   const user = await getUserByEmail(email);
   // Demo accounts have no password and sign in from the demo buttons.

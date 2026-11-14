@@ -7,7 +7,8 @@ export async function POST(req: Request) {
   const user = await getCurrentUser();
   if (!user) return Response.json({ error: "Sign in first." }, { status: 401 });
   if (!geminiConfigured()) return Response.json({ error: "no-ai" }, { status: 501 });
-  const form = await req.formData();
+  const form = await req.formData().catch(() => null);
+  if (!form) return Response.json({ error: "No file uploaded." }, { status: 400 });
   const files = form.getAll("file").filter((f): f is File => f instanceof File);
   if (!files.length) return Response.json({ error: "No files uploaded." }, { status: 400 });
   const total = files.reduce((n, f) => n + f.size, 0);

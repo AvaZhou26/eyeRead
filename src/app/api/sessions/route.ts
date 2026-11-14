@@ -1,7 +1,7 @@
 import { getCurrentUser } from "@/lib/auth";
 import { canViewReading, closePausedSessions, createSession, getReading, getSession, updateSession } from "@/lib/db";
 import { generateSessionAi } from "@/lib/gemini";
-import type { ResumeState, SessionReport } from "@/lib/types";
+import { checkReport, checkResume, parseTimestamp, readJsonBody, strField } from "@/lib/validate";
 
 // Saves a reading session. status "paused" keeps the progress (and the state needed to resume);
 // status "done" finishes it and builds the AI summary. Resuming a paused session updates the
@@ -9,29 +9,34 @@ import type { ResumeState, SessionReport } from "@/lib/types";
 export async function POST(req: Request) {
   const user = await getCurrentUser();
   if (!user) return Response.json({ error: "Sign in first." }, { status: 401 });
-  const body = (await req.json()) as {
-    readingId: string;
-    sessionId?: string | null;
-    startedAt: string;
-    endedAt: string;
-    status?: "paused" | "done";
-    report: SessionReport;
-    resume?: ResumeState | null;
-  };
-  const reading = await getReading(body.readingId);
+  const body = await readJsonBody(req);
+  if (!body) return Response.json({ error: "That request wasn't understood. Reload the page and try again." }, { status: 400 });
+  const readingId = strField(body, "readingId");
+  const sessionId = strField(body, "sessionId");
+  const reading = readingId ? await getReading(readingId) : null;
   if (!reading || !(await canViewReading(user, reading))) return Response.json({ error: "Reading not found." }, { status: 404 });
-  if (!body.report || !Array.isArray(body.report.paragraphs))
-    return Response.json({ error: "Missing session report." }, { status: 400 });
+
+  // The report is built in the browser, so check it fits this reading before saving it:
+  // a malformed one would otherwise break the class pages that read it back.
+  const checked = checkReport(body.report, reading);
+  if ("error" in checked) return Response.json({ error: checked.error }, { status: 400 });
+  const report = checked.report;
+
+  const startedAt = parseTimestamp(body.startedAt);
+  const endedAt = parseTimestamp(body.endedAt);
+  if (!startedAt || !endedAt || endedAt < startedAt)
+    return Response.json({ error: "The session's start and end times aren't valid." }, { status: 400 });
+
   const status = body.status === "paused" ? "paused" : "done";
-  if (status === "paused" && !body.resume) return Response.json({ error: "Missing progress to save." }, { status: 400 });
+  const resume = status === "paused" ? checkResume(body.resume, reading) : null;
+  if (status === "paused" && !resume) return Response.json({ error: "Missing progress to save." }, { status: 400 });
 
-  const ai = status === "done" ? await generateSessionAi(reading, body.report) : null;
-  const resume = status === "paused" ? body.resume! : null;
+  const ai = status === "done" ? await generateSessionAi(reading, report) : null;
 
-  if (body.sessionId) {
-    const existing = await getSession(body.sessionId);
+  if (sessionId) {
+    const existing = await getSession(sessionId);
     if (existing && existing.userId === user.id && existing.readingId === reading.id && existing.status === "paused") {
-      await updateSession(existing.id, { endedAt: body.endedAt, status, sittings: existing.sittings + 1, report: body.report, ai, resume });
+      await updateSession(existing.id, { endedAt, status, sittings: existing.sittings + 1, report, ai, resume });
       return Response.json({ id: existing.id });
     }
   }
@@ -39,11 +44,11 @@ export async function POST(req: Request) {
   const session = await createSession({
     readingId: reading.id,
     userId: user.id,
-    startedAt: body.startedAt,
-    endedAt: body.endedAt,
+    startedAt,
+    endedAt,
     status,
     sittings: 1,
-    report: body.report,
+    report,
     ai,
     resume,
   });
