@@ -9,7 +9,10 @@ const MODEL = process.env.GEMINI_MODEL || "gemini-flash-latest";
 function client(): GoogleGenAI | null {
   const key = process.env.GEMINI_API_KEY;
   if (!key || key === "your-key-here") return null;
-  return new GoogleGenAI({ apiKey: key });
+  // The library defaults to API version "v1", which doesn't know the "gemini-flash-latest"
+  // alias (it answers 404 "not found for API version v1"). "v1beta" does, and also supports
+  // the JSON-schema responses used below.
+  return new GoogleGenAI({ apiKey: key, apiVersion: process.env.GEMINI_API_VERSION || "v1beta" });
 }
 
 export function geminiConfigured(): boolean {
