@@ -4,7 +4,7 @@ A reading coach that uses your laptop webcam to follow your reading line by line
 
 Students read assigned (or their own) readings in a calm, distraction-free reader. Professors see class-wide maps of which passages were skipped or re-read.
 
-> Hackathon demo. Sign-in has no passwords, and data lives in `data/db.json`. Camera video never leaves the browser: only "which words were read" is saved.
+> Hackathon demo. Accounts use an email and password (the two demo accounts sign in with one click), and data lives in a SQLite file, `data/read-assist.db`. Camera video never leaves the browser: only "which words were read" is saved. Reports are measured in the student's browser, so treat them as a study aid, not as proof of reading.
 
 ---
 
@@ -139,7 +139,7 @@ Everything is in a SQLite database file, `data/read-assist.db` (accounts, course
    - **Re-read:** jumping back 2+ lines and staying there, but only over lines you had already *read*. Going back to lines you skimmed or skipped just counts as reading them. Lingering much longer than your usual pace on a paragraph also counts.
 5. **Gentle aids.** The tracker never shows anything that moves with your eyes. The bookmark appears only when you look away or skip a block of lines, and fades on its own.
 
-Simulation check: `npm run simulate` feeds a fake reader with noisy, offset gaze through the real tracker. In recent runs, the estimated line was within ±1 of the true line 92–100% of the time, skipped blocks and look-aways were caught with the marker on the right line, and re-reading was detected in 4 of 5 runs.
+Simulation check: `npm run simulate` feeds a fake reader with noisy, offset gaze through the real tracker. In recent runs, the estimated line was within ±1 of the true line 92–100% of the time, skipped blocks and look-aways were caught with the marker on the right line, and re-reading was detected in about 6 of 10 runs (it's the least reliable signal with webcam-level noise).
 
 ### Where things live
 
@@ -152,6 +152,7 @@ Simulation check: `npm run simulate` feeds a fake reader with noisy, offset gaze
 | `src/components/reader/` | Setup, calibration and reader screens |
 | `src/lib/gemini.ts` | All Gemini calls (summaries, quiz, class digest, PDF clean-up) |
 | `src/lib/pdf.ts` | PDF → clean paragraphs |
-| `src/lib/db.ts` | The tiny JSON-file database |
+| `src/lib/db.ts` | The SQLite database (a local file, or Turso when hosted) |
+| `src/lib/validate.ts` | Checks on data sent by the browser (session reports, form fields) |
 | `scripts/simulate.ts` | Algorithm simulation |
 | `PLAN.md` | Original research and feasibility plan |

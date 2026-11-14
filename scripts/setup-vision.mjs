@@ -12,10 +12,21 @@ const modelPath = "public/mediapipe/face_landmarker.task";
 if (!existsSync(modelPath)) {
   const url =
     "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Model download failed: ${res.status}`);
-  writeFileSync(modelPath, Buffer.from(await res.arrayBuffer()));
-  console.log("✓ Downloaded face_landmarker.task");
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    writeFileSync(modelPath, Buffer.from(await res.arrayBuffer()));
+    console.log("✓ Downloaded face_landmarker.task");
+  } catch (err) {
+    // Being offline shouldn't make `npm install` fail: the app still runs, and reading
+    // without eye tracking still works. A production build does need the model, though.
+    const why = err?.cause?.code || err?.message || err;
+    if (process.env.npm_lifecycle_event === "prebuild") {
+      throw new Error(`Couldn't download the eye-tracking model (${why}). Check your connection and run the build again.`);
+    }
+    console.warn(`! Couldn't download the eye-tracking model (${why}).`);
+    console.warn("  Eye tracking won't work until it's there. When you're online, run: node scripts/setup-vision.mjs");
+  }
 } else {
   console.log("✓ Face model already present");
 }

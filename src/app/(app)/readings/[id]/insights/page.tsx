@@ -54,7 +54,7 @@ export default async function InsightsPage({ params }: PageProps<"/readings/[id]
       />
 
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-8">
-        <Stat label="Completed" value={`${best.size}/${students.length}`} hint={`students · ${allSessions.length} session${allSessions.length === 1 ? "" : "s"} total`} />
+        <Stat label="Started" value={`${best.size}/${students.length}`} hint={`students · ${allSessions.length} session${allSessions.length === 1 ? "" : "s"} total`} />
         <Stat label="Avg coverage" value={avgCoverage === null ? "–" : `${Math.round(avgCoverage)}%`} hint="best session per student" />
         <Stat label="Avg focus" value={avgFocus === null ? "–" : `${Math.round(avgFocus)}%`} hint="best session per student" />
         <Stat label="Avg reading time" value={avgEyesOn === null ? "–" : formatDuration(avgEyesOn)} hint="eyes on the page" />

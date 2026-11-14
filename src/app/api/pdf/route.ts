@@ -5,7 +5,8 @@ import { cleanExtractedText } from "@/lib/gemini";
 export async function POST(req: Request) {
   const user = await getCurrentUser();
   if (!user) return Response.json({ error: "Sign in first." }, { status: 401 });
-  const form = await req.formData();
+  const form = await req.formData().catch(() => null);
+  if (!form) return Response.json({ error: "No file uploaded." }, { status: 400 });
   const file = form.get("file");
   const useAi = form.get("ai") === "1";
   if (!(file instanceof File)) return Response.json({ error: "No file uploaded." }, { status: 400 });
