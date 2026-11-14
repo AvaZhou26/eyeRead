@@ -39,7 +39,8 @@ export function ReaderApp({
   const [saveError, setSaveError] = useState("");
   const [video, setVideo] = useState<HTMLVideoElement | null>(null);
   const [tracker] = useState(() => new FaceTracker());
-  // WebEyeTrack (default engine) rides on the FaceTracker's frames; null = MediaPipe + ridge.
+  // WebEyeTrack (for the "webeyetrack" and "hybrid" engines) rides on the FaceTracker's frames;
+  // null = MediaPipe + ridge, the default.
   const [wet, setWet] = useState<WebEyeTrackSource | null>(null);
   const wetLoad = useRef<Promise<WebEyeTrackSource | null> | null>(null);
   const startedAt = useRef(new Date().toISOString());
@@ -51,7 +52,8 @@ export function ReaderApp({
 
   /** Load WebEyeTrack once. If it fails, fall back to the MediaPipe + ridge pipeline. */
   function loadWet(): Promise<WebEyeTrackSource | null> {
-    if (gazeEngine() !== "webeyetrack") return Promise.resolve(null);
+    // "webeyetrack" and "hybrid" both need it; plain "mediapipe" doesn't.
+    if (gazeEngine() === "mediapipe") return Promise.resolve(null);
     wetLoad.current ??= WebEyeTrackSource.create().catch((e) => {
       console.warn("[webeyetrack] unavailable, using MediaPipe + ridge", e);
       return null;

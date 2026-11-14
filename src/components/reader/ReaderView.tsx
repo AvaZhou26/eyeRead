@@ -11,6 +11,7 @@ import { sigmaYFor } from "@/lib/gaze/gazeModel";
 import { loadPace, type AxisMap } from "@/lib/gaze/readingCalibration";
 import { OneEuroFilter } from "@/lib/gaze/oneEuro";
 import { ReadingTracker, type MarkerInfo, type ToastInfo, type TrackingMode } from "@/lib/gaze/readingTracker";
+import { calibrationMeta, GazeRecorder } from "@/lib/gaze/recorder";
 import type { ReadingState, ResumeState, SessionReport } from "@/lib/types";
 import { useTheme, type ThemeChoice } from "@/components/ThemeToggle";
 import { IconBug, IconChevronLeft, IconChevronRight, IconSettings, IconX } from "@/components/icons";
@@ -31,6 +32,30 @@ const LINE_HEIGHT = 2.5;
 const COL_GAP = 120;
 const TOP_BAR = 56;
 const BOTTOM_BAR = 60;
+
+/**
+ * Developer tool: record this session's eye data (numbers only) to a file, for tuning the
+ * tracker with scripts/replay.ts. On with ?record=1 in the address bar, or the gear menu.
+ */
+const RECORD_KEY = "ra-record";
+function recordingWanted(): boolean {
+  try {
+    return new URLSearchParams(window.location.search).get("record") === "1" || localStorage.getItem(RECORD_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function downloadJson(name: string, data: unknown) {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: "application/json" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
 
 export function loadPrefs(): ReaderPrefs {
   try {
@@ -110,6 +135,9 @@ export function ReaderView({
   const [confirmFinish, setConfirmFinish] = useState(false);
   const [recalibrating, setRecalibrating] = useState(false);
   const [theme, setTheme] = useTheme();
+  // ReaderView only ever renders in the browser (after camera setup), so reading the URL here is safe.
+  const [recording, setRecording] = useState(() => initialMode !== "none" && recordingWanted());
+  const recorderRef = useRef<GazeRecorder | null>(null);
 
   const innerRef = useRef<HTMLDivElement>(null);
   const trackerRef = useRef<ReadingTracker | null>(null);
@@ -279,6 +307,10 @@ export function ReaderView({
           (calibRef.current?.readingFit ? ` · readfit ${axisLabel("y", calibRef.current.readingFit)} ${calibRef.current.readingFit.x ? axisLabel("x", calibRef.current.readingFit.x) : "x –"}` : " · no readfit");
       }
     };
+    if (recording) {
+      recorderRef.current = newRecorder();
+      rt.attachTap(recorderRef.current);
+    }
     if (resume) rt.restore(resume, performance.now() / 1000);
     rt.setPage(layout.byPage[pageRef.current] ?? [], pageRef.current, performance.now() / 1000, "relayout");
     trackerRef.current = rt;
@@ -409,6 +441,42 @@ export function ReaderView({
     };
   }, []);
 
+  // ----- recording eye data (developer tool) -----
+  function newRecorder() {
+    return new GazeRecorder({
+      userAgent: navigator.userAgent,
+      viewport: { w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio },
+      fullscreen: !!document.fullscreenElement,
+      fontSize: prefs.size,
+      calibration: calibrationMeta(calibRef.current),
+    });
+  }
+
+  function setRecordingOn(on: boolean) {
+    try {
+      if (on) localStorage.setItem(RECORD_KEY, "1");
+      else localStorage.removeItem(RECORD_KEY);
+    } catch {}
+    const rt = trackerRef.current;
+    if (on && rt && !recorderRef.current) {
+      recorderRef.current = newRecorder();
+      rt.attachTap(recorderRef.current, performance.now() / 1000);
+    } else if (!on) {
+      rt?.detachTap();
+      recorderRef.current = null;
+    }
+    setRecording(on);
+  }
+
+  /** Save what's been recorded so far to a file (also done automatically on Pause / Finish). */
+  function saveRecording() {
+    const rec = recorderRef.current;
+    if (!rec || rec.frameCount === 0) return;
+    rec.setMeta({ calibration: calibrationMeta(calibRef.current), savedAt: new Date().toISOString() });
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
+    downloadJson(`read-assist-eye-data-${stamp}.json`, rec);
+  }
+
   function calibInfo(): { quality: SessionReport["calibrationQuality"]; errorPx: number | null } {
     const v = calibration?.validation;
     if (mode === "gaze" && v) return { quality: v.quality, errorPx: Math.round(v.meanErrorPx) };
@@ -420,6 +488,7 @@ export function ReaderView({
   function finish() {
     const rt = trackerRef.current;
     if (!rt) return;
+    saveRecording();
     onFinish(rt.buildReport(performance.now() / 1000, paragraphs, calibInfo()));
   }
 
@@ -428,6 +497,7 @@ export function ReaderView({
     if (!rt) return;
     const now = performance.now() / 1000;
     const info = calibInfo();
+    saveRecording();
     onPause(rt.buildReport(now, paragraphs, info), rt.exportState(now, firstWordOfPage.current, info));
   }
 
@@ -474,6 +544,11 @@ export function ReaderView({
         <div className="flex items-center gap-2 min-w-0" title={stateLabel}>
           <span className="h-2 w-2 rounded-full shrink-0 transition-colors duration-700" style={{ background: stateColor }} />
           <span className="text-sm text-muted truncate">{title}</span>
+          {recording && (
+            <span className="text-[11px] font-semibold tracking-wide shrink-0" style={{ color: "var(--away)" }} title="Eye data is being recorded to a file on this computer (numbers only, no video)">
+              ● REC
+            </span>
+          )}
         </div>
         <div className="ml-auto flex items-center gap-2">
           <button className="btn btn-ghost !px-2.5 !py-1.5 text-muted" onClick={() => setSettingsOpen((o) => !o)} aria-label="Reader settings">
@@ -622,6 +697,22 @@ export function ReaderView({
                 onChange={(v) => setPrefs({ ...prefs, showGaze: v })}
                 icon={<IconBug size={14} />}
               />
+            )}
+            {mode === "gaze" && (
+              <div>
+                <Toggle
+                  label="Record eye data (debug)"
+                  hint="Numbers only, no video. Saved as a file on this computer when you pause or finish."
+                  checked={recording}
+                  onChange={setRecordingOn}
+                  icon={<IconBug size={14} />}
+                />
+                {recording && (
+                  <button className="btn btn-ghost w-full mt-2 text-sm" onClick={saveRecording}>
+                    Save eye data now
+                  </button>
+                )}
+              </div>
             )}
             {/* Camera on: recalibrate (eye tracking) or switch this session to eye tracking (focus-only).
                 No camera at all: nothing to offer. */}

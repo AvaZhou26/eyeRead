@@ -175,7 +175,11 @@ Everything is in a SQLite database file, `data/read-assist.db` (accounts, course
    - **Re-read:** jumping back 2+ lines and staying there, but only over lines you had already *read*. Going back to lines you skimmed or skipped just counts as reading them. Lingering much longer than your usual pace on a paragraph also counts.
 5. **Gentle aids.** The tracker never shows anything that moves with your eyes. The bookmark appears only when you look away or skip a block of lines, and fades on its own.
 
-Simulation check: `npm run simulate` feeds a fake reader with noisy, offset gaze through the real tracker. In recent runs, the estimated line was within ±1 of the true line 92–100% of the time, skipped blocks and look-aways were caught with the marker on the right line, and re-reading was detected in about 6 of 10 runs (it's the least reliable signal with webcam-level noise).
+Simulation check: `npm run simulate` feeds a fake reader with noisy, offset gaze through the real tracker. In recent runs, the estimated line was within ±1 of the true line 92–100% of the time, skipped blocks and look-aways were caught with the marker on the right line, and re-reading was detected in nearly every run at typical noise (and about half the time when the gaze is very noisy).
+
+Two more tools for working on the tracker:
+- `npm run simulate:pages` reads several pages with a stretched gaze and realistic blinks, and prints how often the line estimate is right.
+- **Record and replay.** Switch on **Record eye data** in the reader's gear menu (or open the reader with `?record=1`), read, and a JSON file of the session's eye data downloads when you finish (numbers only, no video). `npm run replay -- file.json --linear` plays it back through the tracker and scores it. This is how to tune the tracker against real webcams instead of the simulation; see TESTING.md, step 3b.
 
 ### Where things live
 
@@ -191,4 +195,7 @@ Simulation check: `npm run simulate` feeds a fake reader with noisy, offset gaze
 | `src/lib/db.ts` | The SQLite database (a local file, or Turso when hosted) |
 | `src/lib/validate.ts` | Checks on data sent by the browser (session reports, form fields) |
 | `scripts/simulate.ts` | Algorithm simulation |
+| `scripts/simulate-pages.ts` | Multi-page simulation (stretched gaze, blinks) |
+| `scripts/replay.ts` | Plays a recorded session back through the tracker |
+| `src/lib/gaze/recorder.ts` | Records a session's eye data, and the replay logic |
 | `PLAN.md` | Original research and feasibility plan |

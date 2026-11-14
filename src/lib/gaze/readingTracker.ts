@@ -25,6 +25,8 @@ export const SEC_PER_WORD = 60 / 240;
 // from the reading calibration; else SEC_PER_WORD). At 240 wpm that means:
 const READ_RATIO = 0.35; // ≥35% of normal time on a word → read  (i.e. faster than ~690 wpm is not "reading")
 const SKIM_RATIO = 0.15; // 15–35% → skimmed (~700–1600 wpm); below → skipped
+/** Longest gap without eye data (seconds) that still counts as a blink rather than looking away. */
+const BLINK_GAP_S = 0.45;
 /** "Skimming" state: moving down lines this many times faster than your normal pace. */
 const SKIM_SPEEDUP = 2.75; // at 240 wpm and ~11 words a line ≈ 1 line/s, the old fixed threshold
 
@@ -48,9 +50,26 @@ export interface DebugSnapshot {
   biasY: number;
   gain: number;
   sweeps: number;
+  /** Return sweeps detected since the session started. */
+  totalSweeps: number;
   fps: number;
   face: boolean;
 }
+
+/**
+ * Something that wants a copy of everything the tracker is fed (see recorder.ts). Attach
+ * with `attachTap` right after creating the tracker.
+ */
+export interface TrackerTap {
+  start(opts: TrackerOptions, t0: number): void;
+  restore(state: ResumeState): void;
+  setPage(lines: LineBox[], page: number, now: number, reason: "turn" | "relayout", byKeyboard: boolean): void;
+  frame(frame: FaceFrame | null, gaze: { x: number; y: number } | null, fast: { x: number; y: number } | null, now: number, fps: number): void;
+  visibility(hidden: boolean, now: number): void;
+  retune(sigmaY: number, biasY: number, mode: TrackingMode, alignedByReading: boolean, now: number): void;
+}
+
+export type TrackerOptions = Options;
 
 interface Options {
   mode: TrackingMode;
@@ -161,6 +180,25 @@ export class ReadingTracker {
     return this.opts.mode;
   }
 
+  private tap: TrackerTap | null = null;
+
+  /** Send a copy of everything this tracker is fed to `tap` (call right after creating it). */
+  attachTap(tap: TrackerTap, now = this.t0) {
+    this.tap = tap;
+    tap.start({ ...this.opts }, this.t0);
+    // Attached part-way through a session: tell it which page is showing.
+    if (this.lines.length) tap.setPage(this.lines, this.page, now, "relayout", false);
+  }
+
+  detachTap() {
+    this.tap = null;
+  }
+
+  /** The drift corrections learned so far (for diagnostics). */
+  debugBias() {
+    return { biasY: this.hmm.biasY, gain: this.hmm.gain };
+  }
+
   /** Normal seconds per word for this reader: their own pace if measured, else typical. */
   private get spw() {
     return this.opts.secPerWord ?? SEC_PER_WORD;
@@ -183,7 +221,8 @@ export class ReadingTracker {
   }
 
   /** Re-tune after a recalibration. */
-  retune(sigmaY: number, biasY: number, mode: TrackingMode, alignedByReading = false) {
+  retune(sigmaY: number, biasY: number, mode: TrackingMode, alignedByReading = false, now = this.lastT ?? this.t0) {
+    this.tap?.retune(sigmaY, biasY, mode, alignedByReading, now);
     // Switching from focus-only to eye tracking mid-session: we don't know the line yet.
     if (mode === "gaze" && this.opts.mode !== "gaze") this.hmm.setLines(this.lines, "spread");
     this.opts.mode = mode;
@@ -226,6 +265,7 @@ export class ReadingTracker {
 
   /** Called when the page changes (or the layout is rebuilt). */
   setPage(lines: LineBox[], page: number, now: number, reason: "turn" | "relayout", byKeyboard = false) {
+    this.tap?.setPage(lines, page, now, reason, byKeyboard);
     const prevPage = this.page;
     const prevLines = this.lines;
     if (reason === "turn" && page !== prevPage) {
@@ -294,6 +334,7 @@ export class ReadingTracker {
 
   // ---------- tab visibility ----------
   onVisibility(hidden: boolean, now: number) {
+    this.tap?.visibility(hidden, now);
     const t = now - this.t0;
     if (hidden) {
       this.tabHiddenAt = now;
@@ -308,6 +349,7 @@ export class ReadingTracker {
 
   // ---------- per-frame update ----------
   onFrame(frame: FaceFrame | null, gaze: { x: number; y: number } | null, gazeFast: { x: number; y: number } | null, now: number, fps = 0) {
+    this.tap?.frame(frame, gaze, gazeFast, now, fps);
     if (this.tabHiddenAt !== null) return;
     const dt = this.lastT === null ? 1 / 30 : Math.min(0.25, Math.max(0, now - this.lastT));
     this.lastT = now;
@@ -333,6 +375,11 @@ export class ReadingTracker {
     // 2) Return-sweep detection (big, fast leftward jump of the gaze)
     let sweep = false;
     if (mode === "gaze" && gazeFast && frame?.features) {
+      // A blink hides the eyes for a moment, and people often blink exactly as they jump to
+      // the next line. Keep the gaze history across such short gaps, or that jump is missed.
+      // Only a long gap (looked away) starts the history over.
+      const last = this.gazeHist[this.gazeHist.length - 1];
+      if (last && now - last.t > BLINK_GAP_S) this.gazeHist = [];
       this.gazeHist.push({ t: now, ...gazeFast });
       while (this.gazeHist.length && now - this.gazeHist[0].t > 1.2) this.gazeHist.shift();
       if (lines.length && now - this.lastSweep > 0.7) {
@@ -352,8 +399,6 @@ export class ReadingTracker {
           }
         }
       }
-    } else if (!frame?.features) {
-      this.gazeHist = [];
     }
     while (this.sweepTimes.length && t - this.sweepTimes[0] > 20) this.sweepTimes.shift();
 
@@ -449,6 +494,7 @@ export class ReadingTracker {
       biasY: this.hmm.biasY,
       gain: this.hmm.gain,
       sweeps: this.sweepTimes.length,
+      totalSweeps: this.totalSweeps,
       fps,
       face: !!frame?.face,
     });
@@ -633,6 +679,7 @@ export class ReadingTracker {
 
   /** Continue a paused session: the clock picks up at its old elapsed time. */
   restore(s: ResumeState, now: number) {
+    this.tap?.restore(s);
     if (s.wordDwell.length === this.wordDwell.length) this.wordDwell.set(s.wordDwell);
     if (s.wordRereads.length === this.wordRereads.length) this.wordRereads.set(s.wordRereads);
     this.segments = [...s.segments];

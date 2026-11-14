@@ -54,8 +54,26 @@ teacher and an **Incognito window** (⌘ + Shift + N) for the student. Each wind
 5. Press **G** to show the debug dot (where it thinks you look) and the highlighted line. Press **G** again to hide them.
    - ✅ The highlighted line should mostly follow the line you're reading, within a line or so.
    - The debug line also shows **stretch**. It starts at 1.00 and may change after you finish a page with the **→** key: the tracker is correcting itself. Turn pages with the keyboard, not the mouse, so it can learn.
-6. **Compare with WebEyeTrack:** open the same reading with `?gaze=webeyetrack` added to the reader URL, e.g. `http://localhost:3000/read/<id>?gaze=webeyetrack`, and calibrate again. Note which one follows your lines better.
+6. **Try the hybrid engine (experimental):** add `?gaze=hybrid` to the reader URL and calibrate. It adds WebEyeTrack's raw signal to the default tracker, and is only kept if it does at least as well on your validation dots; otherwise it quietly uses the default (the browser console says which). Record a session with each (step 3b) to compare them with numbers.
+7. **Compare with WebEyeTrack:** open the same reading with `?gaze=webeyetrack` added to the reader URL, e.g. `http://localhost:3000/read/<id>?gaze=webeyetrack`, and calibrate again. Note which one follows your lines better.
    - This is the one thing I couldn't test myself (my browser has no camera), so please tell me how both feel.
+
+## 3b. Record a session so the tracker can be tuned (5 minutes, very useful)
+
+The tracker can only be improved against real eye data, and a recording lets the same session be replayed through a changed tracker again and again. A recording holds numbers only (gaze points, where the lines sat on screen): no video and none of the text.
+
+1. Open a reading that is at least 3 pages long. In the reader, click the **gear** and switch on **Record eye data (debug)**. A red **● REC** appears at the top left. (Or add `?record=1` to the reader's address before you start.)
+2. Read **every page once, top to bottom, at an even pace**, turning pages with **→**. Don't skip, re-read or look away. This "steady read" lets the replay score the tracker.
+3. Click **Finish session**. A file named `read-assist-eye-data-….json` downloads by itself (also on **Pause**, or any time with **Save eye data now** in the gear menu).
+4. In a terminal in the project folder:
+   ```bash
+   npm run replay -- ~/Downloads/read-assist-eye-data-….json --linear
+   ```
+   - ✅ You get one row per page: how many line jumps were noticed, and how often the tracker's line matched a steady read (**exact** and **±1**).
+   - Send the file and that output to whoever is tuning the tracker. Recordings from different people, lighting and glasses are the most valuable.
+5. Switch **Record eye data** off again when you're done; it stays on for later sessions otherwise.
+
+No webcam handy? `RECORD=sim.json npm run simulate:pages` writes a simulated session you can replay the same way.
 
 ## 4. Pause and resume (one report)
 

@@ -6,6 +6,11 @@ Two other changes went in at the same time (neither has been tested with a real 
 - **Wider line spacing** in the reader (2.5× the font size instead of 2×), so lines are 50 px apart at the default size.
 - **Stretch correction.** The tracker already learned a vertical *offset* from the first line of each page. It now also learns a vertical *stretch*: when you read down a page and turn it with the keyboard, your eyes were on the last line, so the distance the camera saw between first and last line, compared with the real distance, gives the stretch. `npx tsx scripts/simulate-pages.ts` shows the effect: with the gaze squashed to 85%, exact-line accuracy goes from about 34% to 58%, with no change when there is no stretch.
 
+**Update (2026-11-14, night).** Three more things, again checked in simulation only:
+- **Blinks no longer hide line jumps.** The tracker spots the jump from the end of one line to the start of the next (a "return sweep") from the last second of gaze. It used to throw that history away on every frame without eye data, so any blink shortly before a jump made it miss the jump, and people often blink exactly then. It now keeps the history across gaps shorter than 0.45 s. In `npm run simulate:pages` (blinks of about 0.2 s every few seconds, often at line ends) the share of line jumps noticed went from 66% to 99%, and the exact-line rate from 54% to 92% with no stretch (40% to 80% with the gaze squashed to 85%).
+- **Hybrid engine in the reader, opt-in:** `?gaze=hybrid` (or `NEXT_PUBLIC_GAZE_ENGINE=hybrid`). WebEyeTrack runs unadapted and its two raw numbers are added to our 14 features before the ridge fit, as in the lab's "Hybrid" row. It is only used when it does at least as well vertically as the plain model on that calibration's validation dots; otherwise the plain model is used. Whenever WebEyeTrack has no fresh result for a frame, the plain model answers for that frame.
+- **Record and replay** (`src/lib/gaze/recorder.ts`, `scripts/replay.ts`, TESTING.md step 3b). This is the way to settle engine and tuning questions with real data: record the same kind of steady read with each engine and compare the replay scores.
+
 ## WebEyeTrack: what it is and what it needs
 
 | | |
