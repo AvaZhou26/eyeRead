@@ -11,7 +11,7 @@ import { applyReadingCalibration, ReadingCalibration } from "./ReadingCalibratio
 import { ReaderView, lineHeightFor, loadPrefs, type ReaderPrefs } from "./ReaderView";
 import { Setup, type CameraState } from "./Setup";
 import { enterFullscreen, FullscreenGate, useOutOfFullscreen } from "./fullscreen";
-import { fromSaved, toSaved, type SavedCalibration } from "@/lib/gaze/savedCalibration";
+import { fromSaved, sameScreen, toSaved, type SavedCalibration } from "@/lib/gaze/savedCalibration";
 import { loadPace } from "@/lib/gaze/readingPace";
 
 // calibrate = the dots; readcal = the reading-pace passage. Both are skipped when the student
@@ -57,7 +57,10 @@ export function ReaderApp({
   // Recalibrate), as long as the engine is the default one, the only one that can be saved.
   // The engine comes from the URL, so it's only known in the browser.
   const engine = useSyncExternalStore(noSubscribe, gazeEngine, () => null);
-  const savedUsable = !!saved && engine === "mediapipe";
+  // ...and only on the screen it was made on (another computer or an external monitor needs
+  // its own). Like the engine, the screen is only known in the browser.
+  const onSavedScreen = useSyncExternalStore(noSubscribe, () => !saved || sameScreen(saved), () => true);
+  const savedUsable = !!saved && engine === "mediapipe" && onSavedScreen;
 
   /** Save a new calibration to the account, replacing the old one (best effort). */
   function saveToAccount(c: CalibrationResult) {
@@ -182,6 +185,7 @@ export function ReaderApp({
             setPhase("calibrate");
           }}
           savedCalibrationAt={savedUsable && saved ? saved.savedAt : null}
+          calibrationNote={saved && engine === "mediapipe" && !onSavedScreen ? "Your saved calibration was made on a different screen, so this one needs its own." : null}
           onUseSaved={() => {
             if (!saved) return;
             setPrefs(loadPrefs());

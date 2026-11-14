@@ -35,6 +35,9 @@ export interface FitOptions {
   clamp?: boolean;
 }
 
+/** How many terms expand() adds to the raw inputs. */
+const EXPANDED_EXTRA = 7;
+
 function expand(f: number[]): number[] {
   const u = (f[0] + f[1]) / 2;
   const v = (f[2] + f[3]) / 2;
@@ -76,14 +79,20 @@ export class GazeModel {
     if (!v || typeof v !== "object") return null;
     const s = v as Partial<GazeModelState>;
     const d = Array.isArray(s.mean) ? s.mean.length : 0;
-    if (d === 0 || d > 64 || !finiteArray(s.mean, d) || !finiteArray(s.std, d) || !finiteArray(s.wx, d + 1) || !finiteArray(s.wy, d + 1)) return null;
+    // expand() needs 8 raw inputs and adds EXPANDED_EXTRA more: anything smaller isn't a model of ours.
+    if (d < 8 + EXPANDED_EXTRA || d > 64 || !finiteArray(s.mean, d) || !finiteArray(s.std, d) || !finiteArray(s.wx, d + 1) || !finiteArray(s.wy, d + 1)) return null;
     if (s.std.some((x) => x <= 0) || typeof s.lambda !== "number" || !Number.isFinite(s.lambda)) return null;
     let range: GazeModelState["range"] = null;
     if (s.range) {
-      if (!finiteArray(s.range.lo) || !finiteArray(s.range.hi, s.range.lo.length)) return null;
+      if (!finiteArray(s.range.lo, d - EXPANDED_EXTRA) || !finiteArray(s.range.hi, d - EXPANDED_EXTRA)) return null;
       range = { lo: s.range.lo, hi: s.range.hi };
     }
     return new GazeModel(s.mean, s.std, s.wx, s.wy, s.lambda, range);
+  }
+
+  /** How many raw eye/head features this model was fitted on. */
+  get inputCount(): number {
+    return this.mean.length - EXPANDED_EXTRA;
   }
 
   private row(features: number[]): number[] {

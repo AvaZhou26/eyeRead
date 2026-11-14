@@ -52,6 +52,8 @@ teacher and an **Incognito window** (⌘ + Shift + N) for the student. Each wind
    - ✅ You get a rating: Great, Okay or Rough. If it's Rough, click **Recalibrate**.
    - ✅ **Full screen only:** while reading, press **Esc**. A card says **Reading happens in full screen** and the page can't be read or turned until you click **Return to full screen**; you're back on the same page. (Doing this during calibration restarts it from the first dot.)
    - ✅ **Calibrate once:** open a *different* reading afterwards, and also **Save & exit** then **Continue reading**. Neither asks you to calibrate: after the camera checks the button says **Start reading**, with **Recalibrate** beside it and the date of your calibration. **Recalibrate** runs the dots (and pace passage) again and replaces the saved calibration.
+   - ✅ **Different screen:** a saved calibration is only reused on the screen it was made on. On another computer or an external monitor the button says **Calibrate & start** again, with a line explaining why. Browser zoom doesn't count as a different screen.
+   - ✅ **Looking beside the page:** stare at something next to the text for 20 seconds, then finish. The report should show that time as a distraction, not as reading.
 4. Read normally. Use **→** for the next page.
 5. Press **G** to show the debug dot (where it thinks you look) and the highlighted line. Press **G** again to hide them.
    - ✅ The highlighted line should mostly follow the line you're reading, within a line or so.

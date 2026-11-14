@@ -397,6 +397,11 @@ export async function updateSession(
   });
 }
 
+/** Replace a finished session's AI summary (used when an earlier attempt failed and is retried). */
+export async function saveSessionAi(id: string, ai: NonNullable<Session["ai"]>) {
+  await (await db()).execute({ sql: "UPDATE sessions SET ai = ? WHERE id = ?", args: [JSON.stringify(ai), id] });
+}
+
 export async function saveRecall(sessionId: string, section: number, text: string): Promise<Session | null> {
   const session = await getSession(sessionId);
   if (!session) return null;
