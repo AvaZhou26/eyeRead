@@ -75,7 +75,8 @@ export function Timeline({
       </div>
       <div className="flex justify-between text-[11px] text-muted mt-1.5 tabular-nums">
         <span>0:00</span>
-        <span>{formatDuration(total)}</span>
+        {/* The timeline spans the whole session, distractions included (not just reading time). */}
+        <span>{formatDuration(total)} · session length</span>
       </div>
       <div className="flex flex-wrap gap-4 text-xs text-muted mt-2">
         {[...legend.entries()].map(([label, k]) => (

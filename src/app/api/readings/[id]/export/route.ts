@@ -1,6 +1,6 @@
 import { getCurrentUser } from "@/lib/auth";
 import { getCourse, getReading, sessionsForReading, studentsInCourse } from "@/lib/db";
-import { attemptsPerStudent, bestPerStudent } from "@/lib/insights";
+import { attemptsPerStudent, bestPerStudent, totalEyesOnPerStudent } from "@/lib/insights";
 
 // CSV of the class insights "Students" table (one row per enrolled student, best session).
 function cell(v: string | number | null | undefined): string {
@@ -21,16 +21,20 @@ export async function GET(req: Request, ctx: RouteContext<"/api/readings/[id]/ex
   const all = await sessionsForReading(reading.id);
   const best = bestPerStudent(all);
   const attempts = attemptsPerStudent(all);
+  const totals = totalEyesOnPerStudent(all);
   const origin = new URL(req.url).origin;
 
   const header = [
-    "Student", "Email", "Status", "Coverage %", "Focus %", "Speed (wpm)", "Time (s)", "Time",
+    // "Reading time" = eyes on the page everywhere in the app. Session length (which also counts
+    // distractions and time looking away) is labelled separately so the two aren't confused.
+    "Student", "Email", "Status", "Coverage %", "Focus %", "Speed (wpm)",
+    "Best session reading time (s, eyes on page)", "Best session length (s, incl. distractions)",
+    "Total reading time (s, eyes on page, all sessions)",
     "Distractions", "Sessions", "Best session date", "Best session link",
   ];
   const rows = (await studentsInCourse(course.id)).map((st) => {
     const s = best.get(st.id);
     const r = s?.report;
-    const mins = r ? `${Math.floor(r.durationSec / 60)}m ${r.durationSec % 60}s` : "";
     return [
       st.name,
       st.email,
@@ -38,8 +42,9 @@ export async function GET(req: Request, ctx: RouteContext<"/api/readings/[id]/ex
       r ? Math.round(r.coveragePct) : "",
       r ? Math.round(r.focusPct) : "",
       r?.avgWpm ?? "",
+      r ? r.activeSec : "",
       r ? r.durationSec : "",
-      mins,
+      totals.has(st.id) ? totals.get(st.id) : "",
       r ? r.distractions.length : "",
       attempts.get(st.id) ?? 0,
       s ? new Date(s.endedAt).toLocaleDateString("en-CA") : "", // YYYY-MM-DD in local time, like the table

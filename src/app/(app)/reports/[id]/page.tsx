@@ -55,9 +55,10 @@ export default async function ReportPage({ params }: PageProps<"/reports/[id]">)
         <Stat
           label="Reading speed"
           value={r.avgWpm ? `${r.avgWpm}` : "–"}
-          hint={r.avgWpm ? `words / minute${r.baselineWpm ? ` · your usual ${r.baselineWpm}` : ""}` : "not enough data"}
+          hint={r.avgWpm ? `words / minute${r.baselineWpm ? ` · ${r.baselineWpm} in the warm-up passage` : ""}` : "not enough data"}
         />
-        <Stat label="Time" value={formatDuration(r.durationSec)} hint={`${formatDuration(r.activeSec)} focused`} />
+        {/* "Reading time" means eyes on the page everywhere in the app; session length is labelled separately. */}
+        <Stat label="Reading time" value={formatDuration(r.activeSec)} hint={`eyes on the page · session length ${formatDuration(r.durationSec)} (incl. distractions)`} />
       </div>
 
       <div className="card px-5 py-4 mb-10">

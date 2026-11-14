@@ -466,6 +466,11 @@ export function ReaderView({
         className="absolute top-0 left-0 right-0 z-20 flex items-center gap-4 px-5 transition-opacity duration-500"
         style={{ height: TOP_BAR, opacity: chromeVisible || settingsOpen ? 1 : 0.22 }}
       >
+        {/* Screen-reader-only: the status dot is visual, so announce losing the face (same wording
+            as calibration). Only on "away" (face not found / turned away), so it stays quiet otherwise. */}
+        <div role="status" aria-live="polite" className="sr-only">
+          {mode !== "none" && state === "away" ? "We can't see your face. Check the camera and lighting." : ""}
+        </div>
         <div className="flex items-center gap-2 min-w-0" title={stateLabel}>
           <span className="h-2 w-2 rounded-full shrink-0 transition-colors duration-700" style={{ background: stateColor }} />
           <span className="text-sm text-muted truncate">{title}</span>

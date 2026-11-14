@@ -79,6 +79,9 @@ export function ReadingCalibration({
   /** Words actually shown (the passage is cut at the bottom of the page). */
   const shownWords = useRef(WORDS.length);
   const startedAt = useRef(0);
+  // Live "can't see your face" warning, same rule and wording as the calibration dots.
+  const lastFaceAt = useRef(0); // set when the passage appears
+  const [faceOk, setFaceOk] = useState(true);
 
   useEffect(() => {
     const upd = () => setVp({ w: window.innerWidth, h: window.innerHeight });
@@ -118,11 +121,19 @@ export function ReadingCalibration({
 
   useEffect(() => {
     if (phase !== "reading") return;
-    return tracker.subscribe((f) => {
+    lastFaceAt.current = performance.now() / 1000; // grace period as the passage appears
+    const id = setInterval(() => setFaceOk(performance.now() / 1000 - lastFaceAt.current < 0.6), 300);
+    const unsub = tracker.subscribe((f) => {
+      if (f.face) lastFaceAt.current = f.t;
       if (!f.features) return;
       const p = calibration.estimator.predict(f);
       if (p) samples.current.push({ t: f.t, x: p.x, y: p.y });
     });
+    return () => {
+      clearInterval(id);
+      unsub();
+      setFaceOk(true);
+    };
   }, [phase, tracker, calibration]);
 
   function finish() {
@@ -202,6 +213,15 @@ export function ReadingCalibration({
                 {w}{" "}
               </span>
             ))}
+          </div>
+          {/* role=status: announced when it appears. Sits in the top margin, above the passage
+              (which starts below the reader's top bar), so it never covers words being read. */}
+          <div role="status" aria-live="polite" className="fixed left-0 right-0 top-3 flex justify-center pointer-events-none">
+            {!faceOk && (
+              <div className="rounded-lg bg-surface px-3 py-1.5 text-sm font-medium text-skip shadow-sm">
+                We can&apos;t see your face. Check the camera and lighting.
+              </div>
+            )}
           </div>
           <div className="fixed left-0 right-0 bottom-6 flex justify-center">
             <button className="btn btn-primary" onClick={finish}>

@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { requireUser } from "@/lib/auth";
 import { coursesForUser, personalReadings, readingsForCourses, sessionsFor, sessionsForReadings, studentCounts } from "@/lib/db";
-import { bestOf, bestPerStudent, readingHabits, studentSummary } from "@/lib/insights";
+import { bestOf, bestPerStudent, plural, readingHabits, studentSummary } from "@/lib/insights";
 import { estimateMinutes, formatDate, formatDueDate, formatDuration } from "@/lib/text";
 import type { Reading, Session, User } from "@/lib/types";
 import { PageHeader } from "@/components/AppShell";
@@ -63,8 +63,12 @@ async function StudentDashboard({ user }: { user: User }) {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-10">
           <Stat label="Assigned readings done" value={`${summary.finished}/${summary.assigned}`} hint={summary.started > summary.finished ? `${summary.started - summary.finished} in progress` : "read 85% or more"} />
           <Stat label="Time reading" value={formatDuration(summary.eyesOnSec)} hint="eyes on the page" />
-          <Stat label="Avg coverage" value={summary.avgCoverage === null ? "–" : `${Math.round(summary.avgCoverage)}%`} hint="of each reading" />
-          <Stat label="Avg speed" value={summary.avgWpm === null ? "–" : `${Math.round(summary.avgWpm)}`} hint={summary.avgWpm === null ? "not enough data yet" : "words / minute"} />
+          <Stat
+            label="Avg coverage"
+            value={summary.avgCoverage === null ? "–" : `${Math.round(summary.avgCoverage)}%`}
+            hint={summary.started ? `across the ${plural(summary.started, "assigned reading")} you've started` : "no assigned readings started yet"}
+          />
+          <Stat label="Avg speed" value={summary.avgWpm === null ? "–" : `${Math.round(summary.avgWpm)}`} hint={summary.avgWpm === null ? "not enough data yet" : "words / minute · assigned readings you've started"} />
         </div>
       )}
 
@@ -165,7 +169,7 @@ async function StudentDashboard({ user }: { user: User }) {
                 <div className="min-w-0 flex-1">
                   <div className="font-medium truncate">{readingsById.get(s.readingId)?.title ?? "Reading"}</div>
                   <div className="text-sm text-muted">
-                    {formatDate(s.endedAt)} · {formatDuration(s.report.durationSec)} · focus {Math.round(s.report.focusPct)}%
+                    {formatDate(s.endedAt)} · {formatDuration(s.report.activeSec)} reading ({formatDuration(s.report.durationSec)} session) · focus {Math.round(s.report.focusPct)}%
                     {s.report.avgWpm ? ` · ${s.report.avgWpm} wpm` : ""}
                     {s.sittings > 1 ? ` · ${s.sittings} sittings` : ""}
                   </div>
@@ -253,7 +257,7 @@ async function ProfessorDashboard({ user }: { user: User }) {
                   <div className="min-w-0 flex-1">
                     <div className="font-medium truncate">{r.title}</div>
                     <div className="text-sm text-muted">
-                      {formatDate(s.endedAt)} · {formatDuration(s.report.durationSec)} · focus {Math.round(s.report.focusPct)}%
+                      {formatDate(s.endedAt)} · {formatDuration(s.report.activeSec)} reading ({formatDuration(s.report.durationSec)} session) · focus {Math.round(s.report.focusPct)}%
                     </div>
                   </div>
                   <StatusPill session={s} />

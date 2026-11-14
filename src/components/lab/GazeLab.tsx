@@ -169,6 +169,13 @@ export function GazeLab() {
   const [lineH, setLineH] = useState(40);
   const [steps, setSteps] = useState(1); // WebEyeTrack's own default
   const [fps, setFps] = useState<{ cam: number; wet: number; timing: WebEyeTrackSource["timing"] }>({ cam: 0, wet: 0, timing: null });
+  // Is a face in view right now? WebEyeTrack only runs on frames with a face, and a dot only
+  // counts once both trackers have seen you looking at it, so this explains "0 fps" and dots
+  // that don't advance.
+  const lastFaceAt = useRef(0);
+  const [faceVisible, setFaceVisible] = useState(false);
+  const [wetError, setWetError] = useState<string | null>(null);
+  const [dotMsg, setDotMsg] = useState("");
   const [results, setResults] = useState<{ rounds: Metric[][]; overall: Metric[]; meta: Record<string, unknown> } | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -191,6 +198,7 @@ export function GazeLab() {
         await tracker.start(videoRef.current!);
         if (cancelled) return;
         unsub = tracker.subscribeRaw((res, video, frame) => {
+          if (frame.face) lastFaceAt.current = performance.now();
           if (!frame.features || wet.busy) return;
           const features = [...frame.features];
           const t = frame.t;
@@ -220,7 +228,13 @@ export function GazeLab() {
         setPhase("error");
       }
     })();
-    const id = setInterval(() => setFps({ cam: tracker.fps, wet: wetRef.current?.fps ?? 0, timing: wetRef.current?.timing ?? null }), 500);
+    const id = setInterval(() => {
+      const faceNow = performance.now() - lastFaceAt.current < 1000;
+      setFaceVisible(faceNow);
+      setWetError(wetRef.current?.lastError ?? null);
+      // fps is a running average updated per result: show 0 once results stop coming.
+      setFps({ cam: tracker.fps, wet: faceNow ? (wetRef.current?.fps ?? 0) : 0, timing: wetRef.current?.timing ?? null });
+    }, 500);
     return () => {
       cancelled = true;
       clearInterval(id);
@@ -248,9 +262,23 @@ export function GazeLab() {
   async function clickDot() {
     if (collecting) return;
     setCollecting(true);
+    setDotMsg("");
     const got = await collect(idx, pos(CAL_POINTS[idx]), 0.12, 0.85, calSamples.current);
     setCollecting(false);
-    if (got < 4) return; // face wasn't visible; click again
+    if (got < 4) {
+      // Say why the dot didn't count, instead of silently staying on it.
+      const faceNow = performance.now() - lastFaceAt.current < 1000;
+      const err = wetRef.current?.lastError;
+      setDotMsg(
+        !faceNow
+          ? "Can't find your face, so this dot didn't count. Face the camera with your face well lit (no bright window behind you), then click the dot again."
+          : err
+            ? `WebEyeTrack couldn't read this frame (${err}), so this dot didn't count. Click it again.`
+            : "Not enough frames while you looked at the dot (blinking or turning away?). Look straight at it and click again.",
+      );
+      return;
+    }
+    setDotMsg("");
     if (idx + 1 < CAL_POINTS.length) setIdx(idx + 1);
     else void fit();
   }
@@ -329,9 +357,20 @@ export function GazeLab() {
 
   return (
     <div className="fixed inset-0 bg-bg select-none overflow-auto">
-      <video ref={videoRef} className="fixed bottom-3 right-3 w-40 rounded opacity-60 -scale-x-100 pointer-events-none" muted playsInline />
+      {/* aria-hidden: otherwise screen readers announce the camera preview as "Unable to play media". */}
+      <video
+        ref={videoRef}
+        aria-hidden="true"
+        tabIndex={-1}
+        suppressHydrationWarning
+        disablePictureInPicture
+        className="fixed bottom-3 right-3 w-40 rounded opacity-60 -scale-x-100 pointer-events-none"
+        muted
+        playsInline
+      />
       <div className="fixed bottom-3 left-3 text-xs text-muted font-mono pointer-events-none">
-        cam {fps.cam.toFixed(0)} fps · WebEyeTrack {fps.wet.toFixed(0)} fps
+        cam {fps.cam.toFixed(0)} fps · {phase === "loading" ? "starting…" : faceVisible ? "face found" : "no face found"} · WebEyeTrack{" "}
+        {wetError ? `error: ${wetError}` : faceVisible ? `${fps.wet.toFixed(0)} fps` : "waiting for a face"}
         {fps.timing && (
           <>
             {" "}
@@ -377,8 +416,14 @@ export function GazeLab() {
               <input type="number" className="input w-20" value={steps} onChange={(e) => setSteps(Math.max(0, Number(e.target.value) || 0))} />
             </label>
           </div>
+          {!faceVisible && (
+            <p role="status" aria-live="polite" className="mt-4 rounded-lg px-3 py-2 text-sm" style={{ background: "var(--skip-soft)" }}>
+              <b>Can&apos;t find your face.</b> Both trackers need to see you: face the camera, light your face from the front, and
+              sit about an arm&apos;s length away. Dots won&apos;t count until a face is found.
+            </p>
+          )}
           <div className="mt-6 flex justify-end">
-            <button className="btn btn-primary" onClick={() => { setIdx(0); setPhase("calibrate"); }}>Begin</button>
+            <button className="btn btn-primary" onClick={() => { setIdx(0); setDotMsg(""); setPhase("calibrate"); }}>Begin</button>
           </div>
         </Card>
       )}
@@ -386,6 +431,16 @@ export function GazeLab() {
       {phase === "calibrate" && (
         <>
           <Hint>Look at the dot, then click it · {idx + 1} of {CAL_POINTS.length}</Hint>
+          {(dotMsg || !faceVisible) && (
+            <div
+              role="status"
+              aria-live="polite"
+              className="fixed left-1/2 top-16 -translate-x-1/2 z-20 max-w-md rounded-xl border border-border bg-surface px-4 py-3 text-sm shadow-sm"
+              style={{ borderColor: "var(--skip)" }}
+            >
+              {dotMsg || "Can't find your face. Dots only count while the camera can see you."}
+            </div>
+          )}
           <Dot at={pos(CAL_POINTS[idx])} onClick={clickDot} shrinking={collecting} />
         </>
       )}
@@ -393,6 +448,16 @@ export function GazeLab() {
       {phase === "validate" && (
         <>
           <Hint>Just look at each dot. No clicking.</Hint>
+          {!faceVisible && (
+            <div
+              role="status"
+              aria-live="polite"
+              className="fixed left-1/2 top-16 -translate-x-1/2 z-20 max-w-md rounded-xl border bg-surface px-4 py-3 text-sm shadow-sm"
+              style={{ borderColor: "var(--skip)" }}
+            >
+              Can&apos;t find your face. These dots only count while the camera can see you.
+            </div>
+          )}
           <Dot key={idx} at={pos(VAL_POINTS[idx])} shrinking={false} />
         </>
       )}

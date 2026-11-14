@@ -75,7 +75,7 @@ export default async function ReadingPage({ params, searchParams }: PageProps<"/
               <div className="text-xs font-semibold uppercase tracking-wider text-accent">In progress</div>
               <h2 className="text-lg font-semibold mt-1">Continue where you left off</h2>
               <p className="text-muted mt-1 text-[15px]">
-                {Math.round(paused.report.coveragePct)}% read so far over {formatDuration(paused.report.durationSec)}
+                {Math.round(paused.report.coveragePct)}% read so far · {formatDuration(paused.report.activeSec)} reading ({formatDuration(paused.report.durationSec)} session)
                 {paused.sittings > 1 ? ` in ${paused.sittings} sittings` : ""} · about {minutesLeft} min left. It all goes into one report.
               </p>
               <div className="mt-3 h-1.5 w-full max-w-sm rounded-full bg-surface-2 overflow-hidden">
@@ -128,7 +128,7 @@ export default async function ReadingPage({ params, searchParams }: PageProps<"/
                 <div className="min-w-0 flex-1">
                   <div className="font-medium">{formatDate(s.endedAt)}</div>
                   <div className="text-sm text-muted">
-                    {formatDuration(s.report.durationSec)} · focus {Math.round(s.report.focusPct)}%
+                    {formatDuration(s.report.activeSec)} reading ({formatDuration(s.report.durationSec)} session) · focus {Math.round(s.report.focusPct)}%
                     {s.report.avgWpm ? ` · ${s.report.avgWpm} wpm` : ""}
                     {s.sittings > 1 ? ` · ${s.sittings} sittings` : ""}
                   </div>

@@ -2,7 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireUser } from "@/lib/auth";
 import { getCourse, getUser, isEnrolled, readingsForCourse, sessionsFor } from "@/lib/db";
-import { bestOf, readingHabits, studentSummary } from "@/lib/insights";
+import { bestOf, plural, readingHabits, studentSummary } from "@/lib/insights";
 import { formatDate, formatDueDate, formatDuration } from "@/lib/text";
 import { PageHeader } from "@/components/AppShell";
 import { EmptyState, HabitCard, OverduePill, Section, Stat, StatusPill, isOverdue } from "@/components/ui";
@@ -39,8 +39,8 @@ export default async function StudentInCoursePage({ params }: PageProps<"/course
         <Stat label="Readings finished" value={`${s.finished}/${s.assigned}`} hint={s.started > s.finished ? `${s.started - s.finished} in progress` : "read 85% or more"} />
         <Stat label="On time" value={s.withDueDate ? `${s.onTime}/${s.withDueDate}` : "–"} hint="finished by the due date" />
         <Stat label="Time reading" value={formatDuration(s.eyesOnSec)} hint={`eyes on the page · ${s.sessions} session${s.sessions === 1 ? "" : "s"}`} />
-        <Stat label="Avg coverage" value={pct(s.avgCoverage)} hint={`focus ${pct(s.avgFocus)}`} />
-        <Stat label="Avg speed" value={s.avgWpm === null ? "–" : Math.round(s.avgWpm)} hint={s.avgWpm === null ? "not enough data" : "words / minute"} />
+        <Stat label="Avg coverage" value={pct(s.avgCoverage)} hint={s.started ? `best session · ${s.started} of ${plural(s.assigned, "reading")} started · focus ${pct(s.avgFocus)}` : "nothing started yet"} />
+        <Stat label="Avg speed" value={s.avgWpm === null ? "–" : Math.round(s.avgWpm)} hint={s.avgWpm === null ? "not enough data" : `wpm · best session · readings started`} />
       </div>
 
       <Section title="Reading by reading">
@@ -54,7 +54,7 @@ export default async function StudentInCoursePage({ params }: PageProps<"/course
                   <th className="font-medium px-5 py-3">Reading</th>
                   <th className="font-medium px-3 py-3">Status</th>
                   <th className="font-medium px-3 py-3">Focus</th>
-                  <th className="font-medium px-3 py-3">Reading time</th>
+                  <th className="font-medium px-3 py-3" title="Eyes on the page, across all sessions on this reading">Total reading time (eyes on page)</th>
                   <th className="font-medium px-3 py-3">Speed</th>
                   <th className="font-medium px-3 py-3">Skipped ¶</th>
                   <th className="font-medium px-3 py-3">Sessions</th>
@@ -82,7 +82,7 @@ export default async function StudentInCoursePage({ params }: PageProps<"/course
                         </div>
                       </td>
                       <td className="px-3 py-3 tabular-nums">{rep ? `${Math.round(rep.focusPct)}%` : "–"}</td>
-                      <td className="px-3 py-3 tabular-nums">{rep ? formatDuration(rep.activeSec) : "–"}</td>
+                      <td className="px-3 py-3 tabular-nums">{mine.length ? formatDuration(mine.reduce((t, x) => t + x.report.activeSec, 0)) : "–"}</td>
                       <td className="px-3 py-3 tabular-nums">{rep?.avgWpm ? `${rep.avgWpm} wpm` : "–"}</td>
                       <td className="px-3 py-3 tabular-nums">{rep ? rep.paragraphs.filter((p) => p.status === "skipped").length : "–"}</td>
                       <td className="px-3 py-3 tabular-nums">

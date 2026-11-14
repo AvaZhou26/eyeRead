@@ -125,6 +125,8 @@ export class WebEyeTrackSource {
   /** True while a frame is in the worker; new frames are skipped until it answers. */
   busy = false;
   fps = 0;
+  /** Why the last step failed (null once a step succeeds). Shown in /gaze-lab. */
+  lastError: string | null = null;
   adapted = false;
   /** Latest result from attach(): gaze output + the FaceFrame time it belongs to. */
   latest: { out: WetOutput; t: number; seq: number } | null = null;
@@ -252,11 +254,13 @@ export class WebEyeTrackSource {
       const now = performance.now();
       if (this.lastAt) this.fps = 0.9 * this.fps + 0.1 * (1000 / Math.max(1, now - this.lastAt));
       this.lastAt = now;
+      this.lastError = null;
       if (!out) return null;
       const cal = fromWire(out.cal);
       return { cal, raw: this.withRaw && out.raw ? fromWire(out.raw) : cal };
     } catch (e) {
       console.warn("[webeyetrack] step failed", e);
+      this.lastError = (e as Error).message || String(e);
       return null;
     } finally {
       this.busy = false;

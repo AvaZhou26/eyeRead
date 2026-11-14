@@ -54,6 +54,8 @@ export function Calibration({
   const [idx, setIdx] = useState(0);
   const [collecting, setCollecting] = useState(false);
   const [faceOk, setFaceOk] = useState(true);
+  /** Why the last dot click didn't count (empty once a click counts). */
+  const [dotMsg, setDotMsg] = useState("");
   const [result, setResult] = useState<CalibrationResult | null>(null);
   const [error, setError] = useState("");
   const [size, setSize] = useState({ w: 0, h: 0 });
@@ -135,9 +137,22 @@ export function Calibration({
   async function clickDot() {
     if (collecting) return;
     setCollecting(true);
+    setDotMsg("");
     const got = await collect(idx, pos(CAL_POINTS[idx]), 0.12, 0.85, calSamples.current);
     setCollecting(false);
-    if (got < (wet ? 3 : 6)) return; // face wasn't visible; let them click again
+    if (got < (wet ? 3 : 6)) {
+      // Not enough frames for this dot: say why instead of silently staying on it.
+      const faceNow = performance.now() / 1000 - lastFaceAt.current < 0.6;
+      setDotMsg(
+        !faceNow
+          ? "That dot didn't count: we can't see your face. Check the camera and lighting, then click it again."
+          : wet?.lastError
+            ? `That dot didn't count: the eye tracker couldn't read your eyes (${wet.lastError}). Click it again.`
+            : "That dot didn't count: we couldn't see your eyes clearly (blinking or turning away?). Look straight at it and click again.",
+      );
+      return;
+    }
+    setDotMsg("");
     if (idx + 1 < CAL_POINTS.length) setIdx(idx + 1);
     else if (wet) {
       // WebEyeTrack must be adapted before the validation dots, which use its live output.
@@ -244,7 +259,7 @@ export function Calibration({
 
       {phase === "calibrate" && size.w > 0 && (
         <>
-          <Hint faceOk={faceOk}>Look at the dot, then click it · {idx + 1} of {CAL_POINTS.length}</Hint>
+          <Hint faceOk={faceOk} note={dotMsg}>Look at the dot, then click it · {idx + 1} of {CAL_POINTS.length}</Hint>
           <Dot at={pos(CAL_POINTS[idx])} onClick={clickDot} shrinking={collecting} clickable />
         </>
       )}
@@ -271,6 +286,14 @@ export function Calibration({
               style={{ borderColor: "var(--accent)", background: "color-mix(in srgb, var(--accent) 25%, transparent)" }}
             />
           )}
+          {/* The live gaze circle freezes when the face is lost: say why. */}
+          <div role="status" aria-live="polite" className="fixed left-0 right-0 top-6 flex justify-center pointer-events-none z-10">
+            {result && !faceOk && (
+              <div className="rounded-lg bg-surface px-3 py-1.5 text-sm font-medium text-skip shadow-sm">
+                We can&apos;t see your face. Check the camera and lighting.
+              </div>
+            )}
+          </div>
           <CenterCard>
             {error || !result ? (
               <>
@@ -346,11 +369,18 @@ function CenterCard({ children }: { children: React.ReactNode }) {
   );
 }
 
-function Hint({ children, faceOk }: { children: React.ReactNode; faceOk: boolean }) {
+function Hint({ children, faceOk, note }: { children: React.ReactNode; faceOk: boolean; note?: string }) {
   return (
-    <div className="absolute left-1/2 top-[38%] -translate-x-1/2 text-center pointer-events-none">
+    <div className="absolute left-1/2 top-[38%] -translate-x-1/2 text-center pointer-events-none max-w-md">
       <div className="text-sm text-muted">{children}</div>
-      {!faceOk && <div className="mt-2 text-sm font-medium text-skip">We can&apos;t see your face. Check the camera and lighting.</div>}
+      {/* role=status: screen readers announce these when they appear */}
+      <div role="status" aria-live="polite">
+        {note ? (
+          <div className="mt-2 text-sm font-medium text-skip">{note}</div>
+        ) : (
+          !faceOk && <div className="mt-2 text-sm font-medium text-skip">We can&apos;t see your face. Check the camera and lighting.</div>
+        )}
+      </div>
     </div>
   );
 }

@@ -253,3 +253,15 @@ export function readingHabits(sessions: Session[], readingsById: Map<string, Rea
   if (avgCov >= 85) habits.push({ id: "thorough", title: "You read thoroughly", detail: `Your sessions average ${Math.round(avgCov)}% coverage.`, tone: "good" });
   return habits;
 }
+
+/** Total eyes-on reading time per student across ALL their sessions (not just the best one). */
+export function totalEyesOnPerStudent(sessions: Session[]): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const s of sessions) map.set(s.userId, (map.get(s.userId) ?? 0) + s.report.activeSec);
+  return map;
+}
+
+/** "1 reading" / "3 readings" */
+export function plural(n: number, word: string, many = `${word}s`): string {
+  return `${n} ${n === 1 ? word : many}`;
+}

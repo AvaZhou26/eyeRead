@@ -2,7 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireUser } from "@/lib/auth";
 import { getCourse, getDigest, getLessonPlan, getReading, sessionsForReading, studentsInCourse } from "@/lib/db";
-import { aggregateParagraphs, attemptsPerStudent, bestPerStudent } from "@/lib/insights";
+import { aggregateParagraphs, attemptsPerStudent, bestPerStudent, plural, totalEyesOnPerStudent } from "@/lib/insights";
 import { formatDate, formatDuration, isHeading } from "@/lib/text";
 import { PageHeader } from "@/components/AppShell";
 import { EmptyState, Section, Stat, StatusPill } from "@/components/ui";
@@ -33,7 +33,12 @@ export default async function InsightsPage({ params }: PageProps<"/readings/[id]
   const avgCoverage = avg((s) => s.report.coveragePct);
   const avgFocus = avg((s) => s.report.focusPct);
   const avgWpm = avg((s) => s.report.avgWpm);
-  const avgEyesOn = avg((s) => s.report.activeSec);
+  // Reading time is everything a student spent on this reading (all sessions), not just the best one.
+  const totals = totalEyesOnPerStudent(allSessions);
+  const avgEyesOn = totals.size ? [...totals.values()].reduce((a, b) => a + b, 0) / totals.size : null;
+  const withSpeed = sessions.filter((s) => s.report.avgWpm !== null).length;
+  // Every average below covers only the students who have started (not-started students aren't 0%).
+  const scope = `best session · ${plural(best.size, "student")} who started`;
   const maxRereads = Math.max(0.0001, ...agg.map((a) => a.avgRereads));
 
   return (
@@ -45,7 +50,7 @@ export default async function InsightsPage({ params }: PageProps<"/readings/[id]
           </Link>
         }
         title={reading.title}
-        subtitle={`Class insights · ${best.size} of ${students.length} students have read it · averages use each student's best session`}
+        subtitle={`Class insights · ${best.size} of ${students.length} students have started it · averages cover only those students`}
         actions={
           <Link href={`/readings/${reading.id}`} className="btn btn-ghost">
             Try it yourself
@@ -55,10 +60,14 @@ export default async function InsightsPage({ params }: PageProps<"/readings/[id]
 
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-8">
         <Stat label="Started" value={`${best.size}/${students.length}`} hint={`students · ${allSessions.length} session${allSessions.length === 1 ? "" : "s"} total`} />
-        <Stat label="Avg coverage" value={avgCoverage === null ? "–" : `${Math.round(avgCoverage)}%`} hint="best session per student" />
-        <Stat label="Avg focus" value={avgFocus === null ? "–" : `${Math.round(avgFocus)}%`} hint="best session per student" />
-        <Stat label="Avg reading time" value={avgEyesOn === null ? "–" : formatDuration(avgEyesOn)} hint="eyes on the page" />
-        <Stat label="Avg speed" value={avgWpm === null ? "–" : `${Math.round(avgWpm)}`} hint={avgWpm === null ? "best session per student" : "wpm · best session per student"} />
+        <Stat label="Avg coverage" value={avgCoverage === null ? "–" : `${Math.round(avgCoverage)}%`} hint={scope} />
+        <Stat label="Avg focus" value={avgFocus === null ? "–" : `${Math.round(avgFocus)}%`} hint={scope} />
+        <Stat label="Avg reading time" value={avgEyesOn === null ? "–" : formatDuration(avgEyesOn)} hint={`total eyes on the page · per student who started`} />
+        <Stat
+          label="Avg speed"
+          value={avgWpm === null ? "–" : `${Math.round(avgWpm)}`}
+          hint={avgWpm === null ? "not enough reading yet" : `wpm · best session · ${plural(withSpeed, "student")} with a speed`}
+        />
       </div>
 
       <div className="mb-10 grid gap-4">
@@ -89,6 +98,10 @@ export default async function InsightsPage({ params }: PageProps<"/readings/[id]
         {students.length === 0 ? (
           <EmptyState>No students enrolled yet. Share the join code {course.joinCode}.</EmptyState>
         ) : (
+          <>
+          <p className="text-xs text-muted mb-2">
+            Status, focus, speed and distractions come from each student&apos;s best session. Total reading time is time with their eyes on the page, added up across all their sessions (time looking away isn&apos;t counted).
+          </p>
           <div className="card overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -97,7 +110,7 @@ export default async function InsightsPage({ params }: PageProps<"/readings/[id]
                   <th className="font-medium px-3 py-3">Status</th>
                   <th className="font-medium px-3 py-3">Focus</th>
                   <th className="font-medium px-3 py-3">Speed</th>
-                  <th className="font-medium px-3 py-3" title="Eyes on the page">Reading time</th>
+                  <th className="font-medium px-3 py-3" title="Eyes on the page, across all of the student's sessions">Total reading time (eyes on page)</th>
                   <th className="font-medium px-3 py-3">Distractions</th>
                   <th className="font-medium px-3 py-3">Sessions</th>
                   <th className="font-medium px-5 py-3 text-right">Best session</th>
@@ -114,7 +127,7 @@ export default async function InsightsPage({ params }: PageProps<"/readings/[id]
                       <td className="px-3 py-3"><StatusPill session={s} /></td>
                       <td className="px-3 py-3 tabular-nums">{s ? `${Math.round(s.report.focusPct)}%` : "–"}</td>
                       <td className="px-3 py-3 tabular-nums">{s?.report.avgWpm ? `${s.report.avgWpm} wpm` : "–"}</td>
-                      <td className="px-3 py-3 tabular-nums">{s ? formatDuration(s.report.activeSec) : "–"}</td>
+                      <td className="px-3 py-3 tabular-nums">{totals.has(st.id) ? formatDuration(totals.get(st.id)!) : "–"}</td>
                       <td className="px-3 py-3 tabular-nums">{s ? s.report.distractions.length : "–"}</td>
                       <td className="px-3 py-3 tabular-nums">{attempts.get(st.id) ?? 0}</td>
                       <td className="px-5 py-3 text-right">
@@ -132,6 +145,7 @@ export default async function InsightsPage({ params }: PageProps<"/readings/[id]
               </tbody>
             </table>
           </div>
+          </>
         )}
       </Section>
 

@@ -2,7 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { requireUser } from "@/lib/auth";
 import { coursesForUser, personalReadings, readingsForCourses, sessionsFor } from "@/lib/db";
-import { readingHabits, studentSummary } from "@/lib/insights";
+import { plural, readingHabits, studentSummary } from "@/lib/insights";
 import { formatDuration } from "@/lib/text";
 import type { Reading, Session } from "@/lib/types";
 import { PageHeader } from "@/components/AppShell";
@@ -26,9 +26,13 @@ export default async function HabitsPage() {
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-10">
         <Stat label="Time reading" value={formatDuration(s.eyesOnSec)} hint="eyes on the page, all time" />
-        <Stat label="Sessions" value={s.sessions} hint={`${s.finished} readings finished`} />
-        <Stat label="Avg coverage" value={s.avgCoverage === null ? "–" : `${Math.round(s.avgCoverage)}%`} hint="best session per reading" />
-        <Stat label="Avg focus" value={s.avgFocus === null ? "–" : `${Math.round(s.avgFocus)}%`} hint="time not distracted" />
+        <Stat label="Sessions" value={s.sessions} hint={`${plural(s.finished, "reading")} finished`} />
+        <Stat
+          label="Avg coverage"
+          value={s.avgCoverage === null ? "–" : `${Math.round(s.avgCoverage)}%`}
+          hint={s.started ? `across all ${plural(s.started, "reading")} you've started (assigned + your own)` : "no readings started yet"}
+        />
+        <Stat label="Avg focus" value={s.avgFocus === null ? "–" : `${Math.round(s.avgFocus)}%`} hint={s.started ? `same ${plural(s.started, "reading")} · time not distracted` : "time not distracted"} />
       </div>
 
       <Section title="What we've noticed">

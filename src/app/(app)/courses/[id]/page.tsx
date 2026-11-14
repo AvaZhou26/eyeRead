@@ -2,7 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireUser } from "@/lib/auth";
 import { canViewCourse, getCourse, readingsForCourse, sessionsFor, sessionsForReadings, studentsInCourse } from "@/lib/db";
-import { bestOf, bestPerStudent, studentSummary } from "@/lib/insights";
+import { bestOf, bestPerStudent, plural, studentSummary, totalEyesOnPerStudent } from "@/lib/insights";
 import { estimateMinutes, formatDueDate, formatDuration } from "@/lib/text";
 import type { Course, Reading, Session, User } from "@/lib/types";
 import { PageHeader } from "@/components/AppShell";
@@ -36,7 +36,8 @@ async function TeacherCourse({ course, readings }: { course: Course; readings: R
       best,
       finished: best.filter((s) => s.report.coveragePct >= 85).length,
       avgCoverage: avg(best.map((s) => s.report.coveragePct)),
-      avgEyesOn: avg(best.map((s) => s.report.activeSec)),
+      // total time per student who started (all their sessions), averaged
+      avgEyesOn: avg([...totalEyesOnPerStudent(sessions.filter((s) => s.readingId === r.id)).values()]),
     };
   });
   const totalEyesOn = sessions.reduce((t, s) => t + s.report.activeSec, 0);
@@ -61,7 +62,11 @@ async function TeacherCourse({ course, readings }: { course: Course; readings: R
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-10">
         <Stat label="Students" value={students.length} hint={`${readings.length} reading${readings.length === 1 ? "" : "s"} assigned`} />
         <Stat label="Readings finished" value={slots ? `${Math.round((finishedSlots / slots) * 100)}%` : "–"} hint={`${finishedSlots} of ${slots} student-readings`} />
-        <Stat label="Avg coverage" value={pct(avg(allBest.map((s) => s.report.coveragePct)))} hint="best session per student" />
+        <Stat
+          label="Avg coverage"
+          value={pct(avg(allBest.map((s) => s.report.coveragePct)))}
+          hint={`best session · across the ${plural(allBest.length, "student-reading")} started (of ${slots})`}
+        />
         <Stat label="Class reading time" value={formatDuration(totalEyesOn)} hint="eyes on the page, all students" />
       </div>
 
@@ -89,7 +94,7 @@ async function TeacherCourse({ course, readings }: { course: Course; readings: R
                     </div>
                     {best.length > 0 && (
                       <div className="text-xs text-muted mt-1">
-                        Avg coverage {pct(avgCoverage)} · avg reading time {formatDuration(avgEyesOn ?? 0)}
+                        Of the {plural(best.length, "student")} who started: avg coverage {pct(avgCoverage)} · avg total reading time (eyes on page) {formatDuration(avgEyesOn ?? 0)}
                       </div>
                     )}
                   </div>
@@ -118,7 +123,7 @@ async function TeacherCourse({ course, readings }: { course: Course; readings: R
                     <div className="min-w-0 flex-1">
                       <div className="text-sm font-medium truncate">{st.name}</div>
                       <div className="text-xs text-muted truncate">
-                        {s.finished}/{readings.length} done · {formatDuration(s.eyesOnSec)}
+                        {s.finished}/{readings.length} done · {formatDuration(s.eyesOnSec)} reading
                       </div>
                     </div>
                     <span className="text-xs text-muted">→</span>
@@ -152,8 +157,8 @@ async function StudentCourse({ course, readings, user }: { course: Course; readi
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-10">
         <Stat label="Readings done" value={`${s.finished}/${s.assigned}`} hint={s.started > s.finished ? `${s.started - s.finished} in progress` : "read 85% or more"} />
         <Stat label="Time reading" value={formatDuration(s.eyesOnSec)} hint="eyes on the page" />
-        <Stat label="Avg coverage" value={pct(s.avgCoverage)} hint="of each reading" />
-        <Stat label="Avg focus" value={pct(s.avgFocus)} hint={s.withDueDate ? `${s.onTime} finished on time` : "time not distracted"} />
+        <Stat label="Avg coverage" value={pct(s.avgCoverage)} hint={s.started ? `across the ${plural(s.started, "reading")} you've started` : "no readings started yet"} />
+        <Stat label="Avg focus" value={pct(s.avgFocus)} hint={s.started ? `across the ${plural(s.started, "reading")} you've started` : "time not distracted"} />
       </div>
 
       <Section title="Readings">

@@ -100,6 +100,10 @@ export function NewReadingForm({
     }
   }
 
+  function openPicker() {
+    if (busy === "") fileRef.current?.click();
+  }
+
   function handleFiles(list: FileList | File[]) {
     const files = Array.from(list);
     if (!files.length) return;
@@ -172,8 +176,19 @@ export function NewReadingForm({
                 setDragging(false);
                 if (busy === "") handleFiles(e.dataTransfer.files);
               }}
-              onClick={() => busy === "" && fileRef.current?.click()}
-              className={`cursor-pointer rounded-xl border-2 border-dashed px-6 py-10 text-center transition ${
+              // A real, focusable control: Tab reaches it, Enter/Space open the file picker.
+              role="button"
+              tabIndex={busy === "" ? 0 : -1}
+              aria-disabled={busy !== ""}
+              aria-label={mode === "pdf" ? "Choose a PDF to upload" : "Choose photos of pages or a scanned PDF"}
+              onClick={openPicker}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  openPicker();
+                }
+              }}
+              className={`cursor-pointer rounded-xl border-2 border-dashed px-6 py-10 text-center transition outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:border-accent ${
                 dragging ? "border-accent bg-accent-soft" : "border-border hover:border-accent"
               }`}
             >
@@ -197,18 +212,21 @@ export function NewReadingForm({
                   <div className="h-full bg-accent transition-all duration-300" style={{ width: `${Math.round(progress.frac * 100)}%` }} />
                 </div>
               )}
-              <input
-                ref={fileRef}
-                type="file"
-                multiple={mode === "photo"}
-                accept={mode === "pdf" ? "application/pdf" : "image/*,application/pdf"}
-                className="hidden"
-                onChange={(e) => {
-                  if (e.target.files) handleFiles(e.target.files);
-                  e.target.value = "";
-                }}
-              />
             </div>
+            {/* Kept outside the dropzone: if it were inside, opening it would also "click" the
+                dropzone again, which can cancel the picker. */}
+            <input
+              ref={fileRef}
+              type="file"
+              multiple={mode === "photo"}
+              accept={mode === "pdf" ? "application/pdf" : "image/*,application/pdf"}
+              className="hidden"
+              tabIndex={-1}
+              onChange={(e) => {
+                if (e.target.files) handleFiles(e.target.files);
+                e.target.value = "";
+              }}
+            />
             {mode === "pdf" && <label className={`flex items-center gap-2 text-sm ${aiAvailable ? "" : "opacity-50"}`}>
               <input type="checkbox" disabled={!aiAvailable} checked={useAi} onChange={(e) => setUseAi(e.target.checked)} />
               Clean up messy formatting with Gemini (slower)
