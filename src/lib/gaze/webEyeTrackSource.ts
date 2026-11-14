@@ -15,15 +15,18 @@ import type { FaceFrame, FaceTracker } from "./faceTracker";
 export type GazeEngine = "webeyetrack" | "mediapipe";
 
 /**
- * Feature flag. Default "webeyetrack"; set NEXT_PUBLIC_GAZE_ENGINE=mediapipe (build time) or
- * add ?gaze=mediapipe to the URL to go back to MediaPipe features + ridge regression.
+ * Feature flag. Default "mediapipe" (MediaPipe features + ridge regression): in the one
+ * side-by-side run we have (GAZE_EVAL.md) it was far steadier vertically than WebEyeTrack
+ * (0.9 vs 2.5 lines per frame), and vertical accuracy is what decides the line you're on.
+ * To try WebEyeTrack, set NEXT_PUBLIC_GAZE_ENGINE=webeyetrack (build time) or add
+ * ?gaze=webeyetrack to the URL.
  */
 export function gazeEngine(): GazeEngine {
   if (typeof window !== "undefined") {
     const q = new URLSearchParams(window.location.search).get("gaze");
     if (q === "mediapipe" || q === "webeyetrack") return q;
   }
-  return process.env.NEXT_PUBLIC_GAZE_ENGINE === "mediapipe" ? "mediapipe" : "webeyetrack";
+  return process.env.NEXT_PUBLIC_GAZE_ENGINE === "webeyetrack" ? "webeyetrack" : "mediapipe";
 }
 
 /** Anything that turns a camera frame into a screen point (viewport CSS px). */
