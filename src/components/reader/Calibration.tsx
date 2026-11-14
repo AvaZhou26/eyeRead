@@ -1,0 +1,311 @@
+"use client";
+// Full-screen calibration: click 13 dots while looking at them, then glance at 5 more
+// (no clicking) so we can measure how accurate tracking is for *you*, right now.
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { FaceFrame, FaceTracker } from "@/lib/gaze/faceTracker";
+import { GazeModel, validate, type CalibSample, type ValidationResult } from "@/lib/gaze/gazeModel";
+import { OneEuroFilter } from "@/lib/gaze/oneEuro";
+
+export interface CalibrationResult {
+  model: GazeModel;
+  validation: ValidationResult;
+}
+
+const CAL_POINTS: [number, number][] = [
+  [50, 50], [6, 8], [50, 8], [94, 8], [94, 50], [94, 92], [50, 92], [6, 92], [6, 50],
+  [28, 29], [72, 29], [72, 71], [28, 71],
+];
+const VAL_POINTS: [number, number][] = [[50, 40], [24, 26], [76, 26], [76, 74], [24, 74]];
+
+type Phase = "intro" | "calibrate" | "validate" | "result";
+
+export function Calibration({
+  tracker,
+  lineHeight,
+  onDone,
+  onCancel,
+  onAttentionOnly,
+}: {
+  tracker: FaceTracker;
+  lineHeight: number;
+  onDone: (r: CalibrationResult) => void;
+  onCancel?: () => void;
+  onAttentionOnly: () => void;
+}) {
+  const [phase, setPhase] = useState<Phase>("intro");
+  const [idx, setIdx] = useState(0);
+  const [collecting, setCollecting] = useState(false);
+  const [faceOk, setFaceOk] = useState(true);
+  const [result, setResult] = useState<CalibrationResult | null>(null);
+  const [error, setError] = useState("");
+  const [size, setSize] = useState({ w: 0, h: 0 });
+
+  const latest = useRef<FaceFrame | null>(null);
+  const lastFaceAt = useRef(0);
+  const calSamples = useRef<CalibSample[]>([]);
+  const valSamples = useRef<CalibSample[]>([]);
+  const collectRef = useRef<{ until: number; from: number; point: number; x: number; y: number; into: CalibSample[] } | null>(null);
+  const dotRef = useRef<HTMLDivElement>(null);
+  const filterX = useRef(new OneEuroFilter(0.6, 0.004));
+  const filterY = useRef(new OneEuroFilter(0.6, 0.004));
+
+  useEffect(() => {
+    const upd = () => setSize({ w: window.innerWidth, h: window.innerHeight });
+    upd();
+    window.addEventListener("resize", upd);
+    return () => window.removeEventListener("resize", upd);
+  }, []);
+
+  // Listen to camera frames: collect samples, and in the result screen draw a live gaze dot.
+  useEffect(() => {
+    return tracker.subscribe((f) => {
+      latest.current = f;
+      if (f.face) lastFaceAt.current = f.t;
+      const c = collectRef.current;
+      if (c && f.features && f.t >= c.from && f.t <= c.until) {
+        c.into.push({ features: f.features, x: c.x, y: c.y, point: c.point });
+      }
+      if (dotRef.current && result && f.features) {
+        const g = result.model.predict(f.features);
+        const x = filterX.current.filter(g.x, f.t);
+        const y = filterY.current.filter(g.y, f.t);
+        dotRef.current.style.transform = `translate(${x - 14}px, ${y - 14}px)`;
+        dotRef.current.style.opacity = "1";
+      }
+    });
+  }, [tracker, result]);
+
+  // Face-visible hint (polled; avoids re-rendering on every frame)
+  useEffect(() => {
+    const id = setInterval(() => setFaceOk(performance.now() / 1000 - lastFaceAt.current < 0.6), 300);
+    return () => clearInterval(id);
+  }, []);
+
+  const pos = useCallback(
+    (p: [number, number]) => ({ x: (p[0] / 100) * size.w, y: (p[1] / 100) * size.h }),
+    [size],
+  );
+
+  const collect = (point: number, at: { x: number; y: number }, delay: number, duration: number, into: CalibSample[]) =>
+    new Promise<number>((resolve) => {
+      const now = performance.now() / 1000;
+      const before = into.length;
+      collectRef.current = { from: now + delay, until: now + delay + duration, point, x: at.x, y: at.y, into };
+      setTimeout(() => {
+        collectRef.current = null;
+        resolve(into.length - before);
+      }, (delay + duration) * 1000 + 30);
+    });
+
+  async function clickDot() {
+    if (collecting) return;
+    setCollecting(true);
+    const got = await collect(idx, pos(CAL_POINTS[idx]), 0.12, 0.85, calSamples.current);
+    setCollecting(false);
+    if (got < 6) return; // face wasn't visible; let them click again
+    if (idx + 1 < CAL_POINTS.length) setIdx(idx + 1);
+    else {
+      setPhase("validate");
+      setIdx(0);
+    }
+  }
+
+  // Validation runs on its own: each dot shows for ~1.6s.
+  useEffect(() => {
+    if (phase !== "validate") return;
+    let cancelled = false;
+    (async () => {
+      for (let i = 0; i < VAL_POINTS.length && !cancelled; i++) {
+        setIdx(i);
+        await collect(100 + i, pos(VAL_POINTS[i]), 0.65, 0.95, valSamples.current);
+      }
+      if (cancelled) return;
+      try {
+        const model = GazeModel.fit(calSamples.current);
+        const validation = validate(model, valSamples.current, lineHeight);
+        // Final model also learns from the validation glances (more data = better).
+        const finalModel = GazeModel.fit([...calSamples.current, ...valSamples.current], model.lambda);
+        filterX.current.reset();
+        filterY.current.reset();
+        setResult({ model: finalModel, validation });
+        setPhase("result");
+      } catch (e) {
+        setError((e as Error).message);
+        setPhase("result");
+      }
+    })();
+    return () => {
+      cancelled = true;
+      collectRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase]);
+
+  function restart() {
+    calSamples.current = [];
+    valSamples.current = [];
+    setResult(null);
+    setError("");
+    setIdx(0);
+    setPhase("calibrate");
+  }
+
+  const total = CAL_POINTS.length + VAL_POINTS.length;
+  const progress = phase === "calibrate" ? idx / total : phase === "validate" ? (CAL_POINTS.length + idx) / total : 1;
+
+  return (
+    <div className="fixed inset-0 z-50 bg-bg select-none">
+      {(phase === "calibrate" || phase === "validate") && (
+        <div className="absolute top-0 left-0 right-0 h-1 bg-surface-2">
+          <div className="h-full bg-accent transition-all duration-300" style={{ width: `${progress * 100}%` }} />
+        </div>
+      )}
+
+      {phase === "intro" && (
+        <CenterCard>
+          <h2 className="text-xl font-semibold">Quick calibration</h2>
+          <p className="text-muted mt-2 leading-relaxed">
+            Dots will appear around the screen. <b className="text-fg">Look right at each dot and click it.</b> Then
+            five more dots appear on their own; just look at them. Keep your head fairly still, like you would while reading.
+          </p>
+          <p className="text-muted mt-3 text-sm">This teaches Read Assist how <i>your</i> eyes look on <i>this</i> screen. About 30 seconds.</p>
+          <div className="mt-6 flex gap-2 justify-end">
+            {onCancel && <button className="btn btn-ghost" onClick={onCancel}>Back</button>}
+            <button className="btn btn-primary" onClick={() => setPhase("calibrate")}>Begin</button>
+          </div>
+        </CenterCard>
+      )}
+
+      {phase === "calibrate" && size.w > 0 && (
+        <>
+          <Hint faceOk={faceOk}>Look at the dot, then click it · {idx + 1} of {CAL_POINTS.length}</Hint>
+          <Dot at={pos(CAL_POINTS[idx])} onClick={clickDot} shrinking={collecting} clickable />
+        </>
+      )}
+
+      {phase === "validate" && size.w > 0 && (
+        <>
+          <Hint faceOk={faceOk}>Now just look at each dot. No clicking.</Hint>
+          <Dot key={idx} at={pos(VAL_POINTS[idx])} shrinking={false} />
+        </>
+      )}
+
+      {phase === "result" && (
+        <>
+          {result && (
+            <div
+              ref={dotRef}
+              className="pointer-events-none fixed left-0 top-0 h-7 w-7 rounded-full border-2 opacity-0"
+              style={{ borderColor: "var(--accent)", background: "color-mix(in srgb, var(--accent) 25%, transparent)" }}
+            />
+          )}
+          <CenterCard>
+            {error || !result ? (
+              <>
+                <h2 className="text-xl font-semibold">Calibration didn&apos;t work</h2>
+                <p className="text-muted mt-2">{error || "We couldn't see your eyes clearly enough."} Check your lighting and try again.</p>
+                <div className="mt-6 flex gap-2 justify-end">
+                  <button className="btn btn-ghost" onClick={onAttentionOnly}>Continue without eye tracking</button>
+                  <button className="btn btn-primary" onClick={restart}>Try again</button>
+                </div>
+              </>
+            ) : (
+              <ResultBody result={result} lineHeight={lineHeight} onRetry={restart} onDone={() => onDone(result)} onAttentionOnly={onAttentionOnly} />
+            )}
+          </CenterCard>
+        </>
+      )}
+    </div>
+  );
+}
+
+function ResultBody({
+  result,
+  lineHeight,
+  onRetry,
+  onDone,
+  onAttentionOnly,
+}: {
+  result: CalibrationResult;
+  lineHeight: number;
+  onRetry: () => void;
+  onDone: () => void;
+  onAttentionOnly: () => void;
+}) {
+  const q = result.validation.quality;
+  const meta = {
+    good: { label: "Great", color: "var(--read)", text: "Tracking is accurate enough to follow you line by line." },
+    fair: { label: "Okay", color: "var(--skim)", text: "Good enough to follow your reading. Some line-level details may be fuzzy." },
+    poor: {
+      label: "Rough",
+      color: "var(--skip)",
+      text: "Tracking is imprecise right now. Better lighting or sitting a little closer usually helps. You can still read: we'll focus on page-level insights.",
+    },
+  }[q];
+  const lines = result.validation.meanAbsDyPx / lineHeight;
+  return (
+    <>
+      <div className="flex items-center gap-3">
+        <span className="pill !text-sm" style={{ color: meta.color, background: `color-mix(in srgb, ${meta.color} 15%, transparent)` }}>
+          {meta.label}
+        </span>
+        <span className="text-sm text-muted">
+          off by ~{Math.round(result.validation.meanErrorPx)}px (≈{lines.toFixed(1)} lines vertically)
+        </span>
+      </div>
+      <h2 className="text-xl font-semibold mt-3">Calibration complete</h2>
+      <p className="text-muted mt-2 leading-relaxed">{meta.text}</p>
+      <p className="text-muted mt-2 text-sm">Look around the screen: the circle should roughly follow your eyes.</p>
+      <div className="mt-6 flex flex-wrap gap-2 justify-end">
+        {q === "poor" && <button className="btn btn-ghost" onClick={onAttentionOnly}>Page-level only</button>}
+        <button className="btn btn-ghost" onClick={onRetry}>Recalibrate</button>
+        <button className="btn btn-primary" onClick={onDone}>Start reading</button>
+      </div>
+    </>
+  );
+}
+
+function CenterCard({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="absolute inset-0 flex items-center justify-center p-6 pointer-events-none">
+      <div className="card max-w-lg w-full p-7 fade-in pointer-events-auto">{children}</div>
+    </div>
+  );
+}
+
+function Hint({ children, faceOk }: { children: React.ReactNode; faceOk: boolean }) {
+  return (
+    <div className="absolute left-1/2 top-[38%] -translate-x-1/2 text-center pointer-events-none">
+      <div className="text-sm text-muted">{children}</div>
+      {!faceOk && <div className="mt-2 text-sm font-medium text-skip">We can&apos;t see your face. Check the camera and lighting.</div>}
+    </div>
+  );
+}
+
+function Dot({ at, onClick, shrinking, clickable }: { at: { x: number; y: number }; onClick?: () => void; shrinking: boolean; clickable?: boolean }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={!clickable}
+      aria-label="Calibration dot"
+      className="absolute -translate-x-1/2 -translate-y-1/2 flex items-center justify-center"
+      style={{ left: at.x, top: at.y, width: 56, height: 56, cursor: clickable ? "pointer" : "default" }}
+    >
+      {!shrinking && (
+        <span className="absolute inset-3 rounded-full" style={{ background: "var(--accent)", animation: "pulse-ring 1.4s ease-out infinite" }} />
+      )}
+      <span
+        className="relative rounded-full"
+        style={{
+          width: shrinking ? 6 : 22,
+          height: shrinking ? 6 : 22,
+          background: "var(--accent)",
+          boxShadow: "0 0 0 4px var(--bg), 0 0 0 5px var(--accent)",
+          transition: "width 850ms ease-in, height 850ms ease-in",
+        }}
+      />
+      <span className="absolute h-1.5 w-1.5 rounded-full" style={{ background: "var(--accent-fg)" }} />
+    </button>
+  );
+}

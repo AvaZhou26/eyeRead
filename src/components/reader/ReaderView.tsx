@@ -1,0 +1,762 @@
+"use client";
+// The distraction-free reader. Text is laid out in CSS columns where each column is
+// one "page" (no scrolling). We measure where every line sits on screen so the
+// tracker can match your gaze to lines.
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { isHeading, splitWords } from "@/lib/text";
+import type { FaceTracker } from "@/lib/gaze/faceTracker";
+import type { LineBox } from "@/lib/gaze/lineHmm";
+import { OneEuroFilter } from "@/lib/gaze/oneEuro";
+import { ReadingTracker, type MarkerInfo, type ToastInfo, type TrackingMode } from "@/lib/gaze/readingTracker";
+import type { ReadingState, SessionReport } from "@/lib/types";
+import { useTheme, type ThemeChoice } from "@/components/ThemeToggle";
+import { IconBug, IconChevronLeft, IconChevronRight, IconSettings, IconX } from "@/components/icons";
+import { Calibration, type CalibrationResult } from "./Calibration";
+
+export interface ReaderPrefs {
+  font: "serif" | "sans" | "hyper";
+  size: "s" | "m" | "l";
+  aids: boolean;
+  showGaze: boolean;
+}
+const DEFAULT_PREFS: ReaderPrefs = { font: "serif", size: "m", aids: true, showGaze: false };
+const FONT_PX = { s: 18, m: 20, l: 23 };
+const FONT_VAR = { serif: "var(--font-reader-serif)", sans: "var(--font-ui)", hyper: "var(--font-reader-hyper)" };
+const LINE_HEIGHT = 2.0; // generous spacing = lines farther apart = easier to tell apart by gaze
+const COL_GAP = 120;
+const TOP_BAR = 56;
+const BOTTOM_BAR = 60;
+
+export function loadPrefs(): ReaderPrefs {
+  try {
+    // The gaze debug view is a developer tool: it always starts hidden (toggle with G).
+    return { ...DEFAULT_PREFS, ...JSON.parse(localStorage.getItem("ra-reader") ?? "{}"), showGaze: false };
+  } catch {
+    return DEFAULT_PREFS;
+  }
+}
+
+export function lineHeightFor(prefs: ReaderPrefs) {
+  return FONT_PX[prefs.size] * LINE_HEIGHT;
+}
+
+interface Layout {
+  lines: LineBox[];
+  byPage: LineBox[][];
+  pages: number;
+}
+
+export function ReaderView({
+  title,
+  paragraphs,
+  tracker,
+  mode: initialMode,
+  calibration: initialCalibration,
+  initialPrefs,
+  onFinish,
+}: {
+  title: string;
+  paragraphs: string[];
+  tracker: FaceTracker | null;
+  mode: TrackingMode;
+  calibration: CalibrationResult | null;
+  initialPrefs: ReaderPrefs;
+  onFinish: (report: SessionReport) => void;
+}) {
+  const [prefs, setPrefs] = useState<ReaderPrefs>(initialPrefs);
+  const [mode, setMode] = useState<TrackingMode>(initialMode);
+  const [calibration, setCalibration] = useState<CalibrationResult | null>(initialCalibration);
+  const [vp, setVp] = useState({ w: 0, h: 0 });
+  const [page, setPage] = useState(0);
+  const [layout, setLayout] = useState<Layout | null>(null);
+  const [state, setState] = useState<ReadingState>("reading");
+  const [marker, setMarker] = useState<MarkerInfo | null>(null);
+  const [toast, setToast] = useState<ToastInfo | null>(null);
+  const [showHint, setShowHint] = useState(false);
+  const [chromeVisible, setChromeVisible] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [confirmFinish, setConfirmFinish] = useState(false);
+  const [recalibrating, setRecalibrating] = useState(false);
+  const [theme, setTheme] = useTheme();
+
+  const innerRef = useRef<HTMLDivElement>(null);
+  const trackerRef = useRef<ReadingTracker | null>(null);
+  const pageRef = useRef(0);
+  const firstWordOfPage = useRef(0);
+  const gazeDotRef = useRef<HTMLDivElement>(null);
+  const lineHiRef = useRef<HTMLDivElement>(null);
+  const debugRef = useRef<HTMLDivElement>(null);
+  const showGazeRef = useRef(prefs.showGaze);
+  const calibRef = useRef(calibration);
+  const modeRef = useRef(mode);
+  const recalibratingRef = useRef(false);
+
+  // ----- words -----
+  const { paraWords, offsets, totalWords, wordParagraph } = useMemo(() => {
+    const paraWords = paragraphs.map(splitWords);
+    const offsets: number[] = [];
+    let n = 0;
+    for (const w of paraWords) {
+      offsets.push(n);
+      n += w.length;
+    }
+    const wordParagraph = new Int32Array(n);
+    paraWords.forEach((w, p) => wordParagraph.fill(p, offsets[p], offsets[p] + w.length));
+    return { paraWords, offsets, totalWords: n, wordParagraph };
+  }, [paragraphs]);
+
+  // ----- geometry -----
+  const fontPx = FONT_PX[prefs.size];
+  const lineH = fontPx * LINE_HEIGHT;
+  const pageW = Math.max(280, Math.min(660, vp.w - 2 * 110));
+  const pageLeft = Math.round((vp.w - pageW) / 2);
+  const pageTop = TOP_BAR + 28;
+  const pageH = Math.max(lineH * 4, Math.floor((vp.h - TOP_BAR - BOTTOM_BAR - 48) / lineH) * lineH);
+  const stride = pageW + COL_GAP;
+
+  useEffect(() => {
+    const upd = () => setVp({ w: window.innerWidth, h: window.innerHeight });
+    upd();
+    window.addEventListener("resize", upd);
+    return () => window.removeEventListener("resize", upd);
+  }, []);
+
+  useEffect(() => {
+    try {
+      const { showGaze: _debugOnly, ...saved } = prefs; // never persist the debug view
+      void _debugOnly;
+      localStorage.setItem("ra-reader", JSON.stringify(saved));
+    } catch {}
+    showGazeRef.current = prefs.showGaze;
+    trackerRef.current?.setAids(prefs.aids);
+    if (!prefs.showGaze) {
+      if (gazeDotRef.current) gazeDotRef.current.style.opacity = "0";
+      if (lineHiRef.current) lineHiRef.current.style.opacity = "0";
+    }
+  }, [prefs]);
+
+  // ----- measure every line after layout -----
+  const measure = useCallback((): Layout | null => {
+    const inner = innerRef.current;
+    if (!inner || vp.w === 0) return null;
+    const spans = inner.querySelectorAll<HTMLSpanElement>("[data-w]");
+    const lines: LineBox[] = [];
+    let cur: LineBox | null = null;
+    const shift = pageRef.current * stride;
+    spans.forEach((s) => {
+      const w = Number(s.dataset.w);
+      const r = s.getBoundingClientRect();
+      const xAbs = r.left + shift - pageLeft;
+      const pg = Math.max(0, Math.floor((xAbs + COL_GAP / 2) / stride));
+      const left = r.left + shift - pg * stride;
+      const right = r.right + shift - pg * stride;
+      const cy = (r.top + r.bottom) / 2;
+      const para = wordParagraph[w];
+      if (cur && cur.page === pg && cur.paragraph === para && Math.abs((cur.top + cur.bottom) / 2 - cy) < lineH * 0.45) {
+        cur.lastWord = w;
+        cur.left = Math.min(cur.left, left);
+        cur.right = Math.max(cur.right, right);
+        cur.top = Math.min(cur.top, r.top);
+        cur.bottom = Math.max(cur.bottom, r.bottom);
+      } else {
+        cur = { index: lines.length, page: pg, top: r.top, bottom: r.bottom, left, right, firstWord: w, lastWord: w, paragraph: para };
+        lines.push(cur);
+      }
+    });
+    const pages = lines.length ? lines[lines.length - 1].page + 1 : 1;
+    const byPage: LineBox[][] = Array.from({ length: pages }, () => []);
+    lines.forEach((l) => byPage[l.page].push(l));
+    return { lines, byPage, pages };
+  }, [vp.w, stride, pageLeft, wordParagraph, lineH]);
+
+  // Re-measure when fonts load or size/font/viewport change, keeping your place.
+  useLayoutEffect(() => {
+    if (vp.w === 0) return;
+    let cancelled = false;
+    const run = () => {
+      if (cancelled) return;
+      // Measure from page 0 to keep math simple, then jump back to the right page.
+      const inner = innerRef.current;
+      if (inner) {
+        inner.style.transition = "none";
+        inner.style.transform = "translateX(0px)";
+        void inner.offsetWidth; // apply instantly (no animation) before measuring
+      }
+      pageRef.current = 0;
+      const l = measure();
+      if (!l) return;
+      const keep = firstWordOfPage.current;
+      const p = Math.max(0, l.lines.find((x) => x.lastWord >= keep)?.page ?? 0);
+      setLayout(l);
+      setPage(p);
+      pageRef.current = p;
+      if (inner) {
+        inner.style.transform = `translateX(${-p * stride}px)`;
+        void inner.offsetWidth;
+        requestAnimationFrame(() => (inner.style.transition = "transform 160ms ease-out"));
+      }
+      trackerRef.current?.setPage(l.byPage[p] ?? [], p, performance.now() / 1000, "relayout");
+    };
+    document.fonts.ready.then(() => requestAnimationFrame(run));
+    return () => {
+      cancelled = true;
+    };
+  }, [measure, prefs.font, prefs.size, vp.w, vp.h, stride]);
+
+  // ----- create the reading tracker once we have a layout -----
+  useEffect(() => {
+    if (!layout || trackerRef.current) return;
+    const v = calibration?.validation;
+    const sigmaY = v ? Math.min(lineH * 5, Math.max(lineH * 0.7, v.meanAbsDyPx * 1.3)) : lineH * 2;
+    const rt = new ReadingTracker(
+      {
+        mode,
+        totalWords,
+        wordParagraph,
+        paragraphWords: paraWords.map((w) => w.length),
+        lineHeight: lineH,
+        sigmaY,
+        initialBiasY: 0,
+        aids: prefs.aids,
+      },
+      performance.now() / 1000,
+    );
+    rt.onState = setState;
+    rt.onMarker = setMarker;
+    rt.onToast = setToast;
+    rt.onDebug = (d) => {
+      if (!showGazeRef.current) return;
+      if (gazeDotRef.current && d.gaze) {
+        gazeDotRef.current.style.opacity = "1";
+        gazeDotRef.current.style.transform = `translate(${d.gaze.x - 9}px, ${d.gaze.y - 9}px)`;
+      }
+      if (lineHiRef.current) {
+        if (d.line) {
+          lineHiRef.current.style.opacity = String(Math.min(1, d.lineProb) * 0.9);
+          lineHiRef.current.style.transform = `translate(${d.line.left - 8}px, ${d.line.top - 6}px)`;
+          lineHiRef.current.style.width = `${d.line.right - d.line.left + 16}px`;
+          lineHiRef.current.style.height = `${d.line.bottom - d.line.top + 12}px`;
+        } else lineHiRef.current.style.opacity = "0";
+      }
+      if (debugRef.current) {
+        debugRef.current.textContent =
+          `state ${d.state} · line ${d.line ? d.line.index : "-"} (${Math.round(d.lineProb * 100)}%) · off ${Math.round(d.offProb * 100)}%` +
+          ` · bias ${Math.round(d.biasY)}px · sweeps/20s ${d.sweeps} · ${Math.round(d.fps)} fps${d.face ? "" : " · no face"}`;
+      }
+    };
+    rt.setPage(layout.byPage[pageRef.current] ?? [], pageRef.current, performance.now() / 1000, "relayout");
+    trackerRef.current = rt;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layout]);
+
+  useEffect(() => {
+    calibRef.current = calibration;
+    modeRef.current = mode;
+  }, [calibration, mode]);
+
+  // ----- feed camera frames → gaze → reading tracker -----
+  useEffect(() => {
+    const fx = new OneEuroFilter(0.6, 0.004), fy = new OneEuroFilter(0.6, 0.004);
+    const qx = new OneEuroFilter(2.5, 0.01), qy = new OneEuroFilter(2.5, 0.01);
+    if (!tracker || mode === "none") {
+      // No camera: tick the tracker on a timer so page time is still measured.
+      const id = setInterval(() => trackerRef.current?.onFrame(null, null, null, performance.now() / 1000), 100);
+      return () => clearInterval(id);
+    }
+    return tracker.subscribe((f) => {
+      const rt = trackerRef.current;
+      if (!rt || recalibratingRef.current) return;
+      let gaze = null, fast = null;
+      const model = calibRef.current?.model;
+      if (modeRef.current === "gaze" && model && f.features) {
+        const g = model.predict(f.features);
+        gaze = { x: fx.filter(g.x, f.t), y: fy.filter(g.y, f.t) };
+        fast = { x: qx.filter(g.x, f.t), y: qy.filter(g.y, f.t) };
+      }
+      rt.onFrame(f, gaze, fast, f.t, tracker.fps);
+    });
+  }, [tracker, mode]);
+
+  useEffect(() => {
+    recalibratingRef.current = recalibrating;
+  }, [recalibrating]);
+
+  // Tab switches count as distractions.
+  useEffect(() => {
+    const onVis = () => trackerRef.current?.onVisibility(document.hidden, performance.now() / 1000);
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
+
+  // ----- paging -----
+  const goTo = useCallback(
+    (p: number) => {
+      if (!layout) return;
+      const np = Math.max(0, Math.min(layout.pages - 1, p));
+      if (np === pageRef.current) return;
+      pageRef.current = np;
+      setPage(np);
+      firstWordOfPage.current = layout.byPage[np]?.[0]?.firstWord ?? 0;
+      if (innerRef.current) innerRef.current.style.transform = `translateX(${-np * stride}px)`;
+      trackerRef.current?.setPage(layout.byPage[np] ?? [], np, performance.now() / 1000, "turn");
+      setMarker(null);
+    },
+    [layout, stride],
+  );
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (settingsOpen || confirmFinish || recalibrating) return;
+      if ((e.target as HTMLElement)?.tagName === "INPUT") return;
+      if (["ArrowRight", "PageDown", " "].includes(e.key)) {
+        e.preventDefault();
+        goTo(pageRef.current + 1);
+      } else if (["ArrowLeft", "PageUp"].includes(e.key)) {
+        e.preventDefault();
+        goTo(pageRef.current - 1);
+      } else if (e.key.toLowerCase() === "g" && modeRef.current === "gaze") {
+        setPrefs((p) => ({ ...p, showGaze: !p.showGaze }));
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [goTo, settingsOpen, confirmFinish, recalibrating]);
+
+  // ----- chrome fades away while you read -----
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>;
+    const wake = () => {
+      setChromeVisible(true);
+      clearTimeout(timer);
+      timer = setTimeout(() => setChromeVisible(false), 3500);
+    };
+    wake();
+    window.addEventListener("mousemove", wake);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("mousemove", wake);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const id = setTimeout(() => setToast(null), 8000);
+    return () => clearTimeout(id);
+  }, [toast]);
+
+  // First two sessions: a short hint about where the controls are.
+  // The ref makes sure we count each session ONCE (React runs effects twice in development).
+  const hintSeen = useRef<number | null>(null);
+  useEffect(() => {
+    if (hintSeen.current === null) {
+      let seen = 0;
+      try {
+        seen = Number(localStorage.getItem("ra-reader-hints") ?? "0") || 0;
+        localStorage.setItem("ra-reader-hints", String(seen + 1));
+      } catch {}
+      hintSeen.current = seen;
+    }
+    if (hintSeen.current >= 2) return;
+    // Starts after Chrome's own "press Esc to exit full screen" banner has gone.
+    const show = setTimeout(() => setShowHint(true), 1200);
+    const hide = setTimeout(() => setShowHint(false), 10000);
+    return () => {
+      clearTimeout(show);
+      clearTimeout(hide);
+    };
+  }, []);
+
+  function finish() {
+    const rt = trackerRef.current;
+    if (!rt) return;
+    const v = calibration?.validation;
+    const report = rt.buildReport(performance.now() / 1000, paragraphs, {
+      quality: mode === "gaze" && v ? v.quality : "attention-only",
+      errorPx: mode === "gaze" && v ? Math.round(v.meanErrorPx) : null,
+    });
+    onFinish(report);
+  }
+
+  const lastPage = layout ? page >= layout.pages - 1 : false;
+  // Status chip. Line-level states (reading / skimming …) only exist with eye tracking.
+  // Focus-only sessions just say so (plus whether the camera can see you, which is what
+  // the report's Focus % is based on); with no camera at all it's "Not tracking".
+  const away = state === "away" || state === "offtext";
+  const stateColor =
+    mode === "none"
+      ? "var(--faint)"
+      : mode === "attention"
+        ? away
+          ? "var(--away)"
+          : "var(--accent)"
+        : state === "reading"
+          ? "var(--read)"
+          : state === "skimming"
+            ? "var(--skim)"
+            : state === "pausing"
+              ? "var(--accent)"
+              : "var(--away)";
+  const stateLabel =
+    mode === "none"
+      ? "Not tracking"
+      : mode === "attention"
+        ? away
+          ? "Focus only · can't see you"
+          : "Focus only"
+        : { reading: "Reading", skimming: "Moving quickly", pausing: "Paused", offtext: "Looking away", away: "Away" }[state];
+
+  return (
+    <div className="fixed inset-0 reader-surface overflow-hidden" style={{ cursor: chromeVisible ? "auto" : "none" }}>
+      {/* Top bar */}
+      <header
+        className="absolute top-0 left-0 right-0 z-20 flex items-center gap-4 px-5 transition-opacity duration-500"
+        style={{ height: TOP_BAR, opacity: chromeVisible || settingsOpen ? 1 : 0.22 }}
+      >
+        <div className="flex items-center gap-2 min-w-0" title={stateLabel}>
+          <span className="h-2 w-2 rounded-full shrink-0 transition-colors duration-700" style={{ background: stateColor }} />
+          <span className="text-sm text-muted truncate">{title}</span>
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          <button className="btn btn-ghost !px-2.5 !py-1.5 text-muted" onClick={() => setSettingsOpen((o) => !o)} aria-label="Reader settings">
+            <IconSettings size={16} />
+          </button>
+          <button className="btn btn-ghost !py-1.5 text-sm" onClick={() => (lastPage ? finish() : setConfirmFinish(true))}>
+            Finish session
+          </button>
+        </div>
+      </header>
+
+      {/* Pages */}
+      <div className="absolute overflow-hidden" style={{ left: pageLeft, top: pageTop, width: pageW, height: pageH, zIndex: 1 }}>
+        <div
+          ref={innerRef}
+          className="reader-columns"
+          style={{
+            width: pageW,
+            height: pageH,
+            columnWidth: pageW,
+            columnGap: COL_GAP,
+            fontFamily: FONT_VAR[prefs.font],
+            fontSize: fontPx,
+            lineHeight: LINE_HEIGHT,
+          }}
+        >
+          <TextBlock paraWords={paraWords} offsets={offsets} paragraphs={paragraphs} />
+        </div>
+      </div>
+
+      {/* Gaze debug layer (press G) */}
+      <div ref={lineHiRef} className="pointer-events-none absolute left-0 top-0 rounded-md opacity-0" style={{ background: "var(--accent-soft)", zIndex: 0 }} />
+      <div
+        ref={gazeDotRef}
+        className="pointer-events-none absolute left-0 top-0 h-[18px] w-[18px] rounded-full opacity-0 z-30"
+        style={{ background: "color-mix(in srgb, var(--accent) 35%, transparent)", border: "2px solid var(--accent)" }}
+      />
+      {prefs.showGaze && mode === "gaze" && (
+        <div ref={debugRef} className="absolute left-4 bottom-16 z-30 text-[11px] font-mono text-muted bg-surface/80 rounded-md px-2 py-1 border border-border" />
+      )}
+
+      {/* "Your place was here" marker: only appears after you look away or jump ahead */}
+      {marker && (
+        <PlaceMarker
+          line={marker.line}
+          reason={marker.reason}
+          lineH={lineH}
+          roomLeft={pageLeft}
+          onDismiss={() => {
+            trackerRef.current?.dismissMarker();
+            setMarker(null);
+          }}
+        />
+      )}
+
+      {showHint && !toast && (
+        <div className="absolute left-1/2 -translate-x-1/2 z-30 fade-in w-max max-w-[calc(100vw-32px)]" style={{ bottom: BOTTOM_BAR + 8 }}>
+          <div className="card px-4 py-2 text-xs text-muted flex items-center gap-3">
+            <span>
+              <b className="text-fg">← →</b> turn pages · move the mouse for <b className="text-fg">Settings</b> and{" "}
+              <b className="text-fg">Finish</b> (top right) · <b className="text-fg">Esc</b> leaves full screen
+            </span>
+            <button className="text-muted hover:text-fg" onClick={() => setShowHint(false)} aria-label="Dismiss hint">
+              <IconX size={13} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Toast */}
+      {toast && (
+        <div className="absolute left-1/2 -translate-x-1/2 z-30 fade-in" style={{ top: 8 }}>
+          <div className="card flex items-center gap-3 pl-4 pr-2 py-2 text-sm">
+            <span>{toast.message}</span>
+            {toast.goToPage !== null && (
+              <button
+                className="btn btn-ghost !py-1 !px-2.5"
+                onClick={() => {
+                  goTo(toast.goToPage!);
+                  setToast(null);
+                }}
+              >
+                Go back
+              </button>
+            )}
+            <button className="p-1 text-muted hover:text-fg" onClick={() => setToast(null)} aria-label="Dismiss">
+              <IconX size={14} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Bottom bar */}
+      <footer
+        className="absolute bottom-0 left-0 right-0 z-20 flex items-center justify-center gap-5 transition-opacity duration-500"
+        style={{ height: BOTTOM_BAR, opacity: chromeVisible ? 1 : 0.35 }}
+      >
+        <button className="p-2 rounded-lg text-muted hover:text-fg disabled:opacity-30" onClick={() => goTo(page - 1)} disabled={page === 0} aria-label="Previous page">
+          <IconChevronLeft size={20} />
+        </button>
+        <div className="flex flex-col items-center gap-1.5 w-40">
+          <span className="text-xs text-muted tabular-nums">
+            {layout ? `${page + 1} / ${layout.pages}` : "…"}
+          </span>
+          <div className="h-[3px] w-full rounded-full bg-surface-2 overflow-hidden">
+            <div className="h-full bg-accent/60 transition-all duration-300" style={{ width: layout ? `${((page + 1) / layout.pages) * 100}%` : "0%" }} />
+          </div>
+        </div>
+        {lastPage ? (
+          <button className="btn btn-primary !py-1.5" onClick={finish}>
+            Finish &amp; see report
+          </button>
+        ) : (
+          <button className="p-2 rounded-lg text-muted hover:text-fg" onClick={() => goTo(page + 1)} aria-label="Next page">
+            <IconChevronRight size={20} />
+          </button>
+        )}
+      </footer>
+
+      {/* Settings popover */}
+      {settingsOpen && (
+        <div className="absolute inset-0 z-40" onClick={() => setSettingsOpen(false)}>
+          <div className="card absolute right-5 w-80 p-5 space-y-5 fade-in" style={{ top: TOP_BAR }} onClick={(e) => e.stopPropagation()}>
+            <Seg
+              label="Theme"
+              value={theme}
+              options={[["system", "Auto"], ["light", "Light"], ["dark", "Dark"], ["sepia", "Sepia"]]}
+              onChange={(v) => setTheme(v as ThemeChoice)}
+            />
+            <Seg label="Font" value={prefs.font} options={[["serif", "Serif"], ["sans", "Sans"], ["hyper", "Legible"]]} onChange={(v) => setPrefs({ ...prefs, font: v as ReaderPrefs["font"] })} />
+            <Seg label="Text size" value={prefs.size} options={[["s", "A"], ["m", "A+"], ["l", "A++"]]} onChange={(v) => setPrefs({ ...prefs, size: v as ReaderPrefs["size"] })} />
+            <Toggle
+              label="Reading aids"
+              hint="A soft marker shows where you left off after you look away."
+              checked={prefs.aids}
+              onChange={(v) => setPrefs({ ...prefs, aids: v })}
+            />
+            {mode === "gaze" && (
+              <Toggle
+                label="Show gaze (debug)"
+                hint="See what the tracker sees. Shortcut: G"
+                checked={prefs.showGaze}
+                onChange={(v) => setPrefs({ ...prefs, showGaze: v })}
+                icon={<IconBug size={14} />}
+              />
+            )}
+            {/* Camera on: recalibrate (eye tracking) or switch this session to eye tracking (focus-only).
+                No camera at all: nothing to offer. */}
+            {tracker && mode !== "none" && (
+              <div>
+                <button
+                  className="btn btn-ghost w-full"
+                  onClick={() => {
+                    setSettingsOpen(false);
+                    setRecalibrating(true);
+                  }}
+                >
+                  {mode === "gaze" ? "Recalibrate eye tracking" : "Turn on eye tracking"}
+                </button>
+                {mode !== "gaze" && (
+                  <p className="text-xs text-muted mt-1.5">
+                    This session is focus-only. Calibrating switches it to line-by-line tracking from here on.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Finish confirmation */}
+      {confirmFinish && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/25 fade-in" onClick={() => setConfirmFinish(false)}>
+          <div className="card max-w-sm w-full p-6" onClick={(e) => e.stopPropagation()}>
+            <h3 className="font-semibold text-lg">Finish this session?</h3>
+            <p className="text-muted text-sm mt-1.5">
+              You&apos;re on page {page + 1} of {layout?.pages}. Pages you haven&apos;t opened will count as skipped, and we&apos;ll summarize them for you.
+            </p>
+            <div className="flex justify-end gap-2 mt-5">
+              <button className="btn btn-ghost" onClick={() => setConfirmFinish(false)}>Keep reading</button>
+              <button className="btn btn-primary" onClick={finish}>Finish</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {recalibrating && tracker && (
+        <Calibration
+          tracker={tracker}
+          lineHeight={lineH}
+          onCancel={() => setRecalibrating(false)}
+          onAttentionOnly={() => {
+            setMode("attention");
+            trackerRef.current?.retune(lineH * 2, 0, "attention");
+            setRecalibrating(false);
+          }}
+          onDone={(r) => {
+            setCalibration(r);
+            setMode("gaze");
+            const sigmaY = Math.min(lineH * 5, Math.max(lineH * 0.7, r.validation.meanAbsDyPx * 1.3));
+            trackerRef.current?.retune(sigmaY, 0, "gaze");
+            setRecalibrating(false);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/** The text itself. Memoised so turning pages never re-renders thousands of words. */
+const TextBlock = memo(function TextBlock({
+  paraWords,
+  offsets,
+  paragraphs,
+}: {
+  paraWords: string[][];
+  offsets: number[];
+  paragraphs: string[];
+}) {
+  return (
+    <>
+      {paraWords.map((words, p) => {
+        const content = words.map((w, i) => (
+          <span key={i}>
+            <span data-w={offsets[p] + i}>{w}</span>{" "}
+          </span>
+        ));
+        return isHeading(paragraphs[p]) ? (
+          <h2 key={p} style={{ fontSize: "1.15em" }}>{content}</h2>
+        ) : (
+          <p key={p}>{content}</p>
+        );
+      })}
+    </>
+  );
+});
+
+function PlaceMarker({
+  line,
+  reason,
+  lineH,
+  roomLeft,
+  onDismiss,
+}: {
+  line: LineBox;
+  reason: "away" | "jump";
+  lineH: number;
+  roomLeft: number;
+  onDismiss: () => void;
+}) {
+  const cy = (line.top + line.bottom) / 2;
+  const label = reason === "away" ? "You left off here" : "Your place was here";
+  const showSideLabel = roomLeft > 190;
+  return (
+    <>
+      {/* soft wash behind the line */}
+      <div
+        className="pointer-events-none absolute place-marker rounded-md"
+        style={{
+          left: line.left - 10,
+          top: cy - lineH / 2 + 4,
+          width: line.right - line.left + 20,
+          height: lineH - 8,
+          background: "var(--accent-soft)",
+          opacity: 0.75,
+          zIndex: 0,
+        }}
+      />
+      <div className="absolute place-marker z-20 flex items-center gap-2" style={{ right: `calc(100% - ${line.left - 18}px)`, top: cy - 14, height: 28 }}>
+        {showSideLabel && (
+          <button
+            onClick={onDismiss}
+            className="text-xs font-medium rounded-full px-2.5 py-1 whitespace-nowrap"
+            style={{ color: "var(--accent)", background: "var(--accent-soft)" }}
+            title="Dismiss"
+          >
+            {label}
+          </button>
+        )}
+        <span className="h-6 w-[3px] rounded-full" style={{ background: "var(--accent)" }} />
+      </div>
+      {!showSideLabel && (
+        <button
+          onClick={onDismiss}
+          className="absolute place-marker z-20 text-xs font-medium rounded-full px-2.5 py-0.5"
+          style={{ left: line.left, top: cy - lineH / 2 - 14, color: "var(--accent)", background: "var(--accent-soft)" }}
+        >
+          {label}
+        </button>
+      )}
+    </>
+  );
+}
+
+function Seg({ label, value, options, onChange }: { label: string; value: string; options: [string, string][]; onChange: (v: string) => void }) {
+  return (
+    <div>
+      <div className="label">{label}</div>
+      <div className="grid gap-1 p-1 rounded-lg bg-surface-2 border border-border" style={{ gridTemplateColumns: `repeat(${options.length}, 1fr)` }}>
+        {options.map(([v, l]) => (
+          <button
+            key={v}
+            onClick={() => onChange(v)}
+            className={`rounded-md py-1 text-xs font-medium transition ${value === v ? "bg-surface shadow-sm text-fg" : "text-muted hover:text-fg"}`}
+          >
+            {l}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Toggle({
+  label,
+  hint,
+  checked,
+  onChange,
+  icon,
+}: {
+  label: string;
+  hint: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  icon?: React.ReactNode;
+}) {
+  return (
+    <label className="flex items-start gap-3 cursor-pointer">
+      <span className="flex-1">
+        <span className="text-sm font-medium flex items-center gap-1.5">{icon}{label}</span>
+        <span className="block text-xs text-muted mt-0.5">{hint}</span>
+      </span>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        onClick={() => onChange(!checked)}
+        className="relative mt-0.5 h-5 w-9 rounded-full transition-colors shrink-0"
+        style={{ background: checked ? "var(--accent)" : "var(--border)" }}
+      >
+        <span className="absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all" style={{ left: checked ? 18 : 2 }} />
+      </button>
+    </label>
+  );
+}

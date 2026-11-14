@@ -6,12 +6,17 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "postinstall": "node scripts/setup-vision.mjs",
+    "simulate": "npx --yes tsx scripts/simulate.ts"
   },
   "dependencies": {
+    "@google/genai": "^3.3.0",
+    "@mediapipe/tasks-vision": "^1.2.3",
     "next": "16.4.6",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "unpdf": "^2.1.0"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "4.3.3",

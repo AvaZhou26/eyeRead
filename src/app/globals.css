@@ -1,26 +1,302 @@
 @import "tailwindcss";
 
+/* ------------------------------------------------------------------
+   Design tokens. Every color in the app comes from these variables,
+   so light / dark / sepia themes "just work".
+------------------------------------------------------------------- */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --bg: #f7f5f0;
+  --surface: #ffffff;
+  --surface-2: #f0ede6;
+  --fg: #1f1d1a;
+  --muted: #6b665d;
+  --faint: #a29c90;
+  --border: #e4dfd5;
+  --accent: #3c6e71;
+  --accent-hover: #2f5a5d;
+  --accent-fg: #ffffff;
+  --accent-soft: #e2eded;
+  --read: #6f9e7a;
+  --read-soft: rgba(111, 158, 122, 0.16);
+  --skim: #c79a3a;
+  --skim-soft: rgba(199, 154, 58, 0.2);
+  --skip: #c46b6b;
+  --skip-soft: rgba(196, 107, 107, 0.17);
+  --reread: #7d6bb0;
+  --reread-soft: rgba(125, 107, 176, 0.16);
+  --away: #8a8478;
+  --reader-bg: #faf8f3;
+  --reader-fg: #23211d;
+  --shadow: 0 1px 2px rgba(31, 29, 26, 0.04), 0 4px 16px rgba(31, 29, 26, 0.05);
+  color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+  :root:not([data-theme="light"]):not([data-theme="sepia"]) {
+    --bg: #131416;
+    --surface: #1a1b1e;
+    --surface-2: #222327;
+    --fg: #e6e2da;
+    --muted: #a39e94;
+    --faint: #6d6960;
+    --border: #2c2d31;
+    --accent: #7fb3b5;
+    --accent-hover: #96c4c6;
+    --accent-fg: #0f1415;
+    --accent-soft: rgba(127, 179, 181, 0.14);
+    --read: #86b892;
+    --read-soft: rgba(134, 184, 146, 0.16);
+    --skim: #d6ae5a;
+    --skim-soft: rgba(214, 174, 90, 0.26);
+    --skip: #d98a8a;
+    --skip-soft: rgba(217, 138, 138, 0.26);
+    --reread: #a594d6;
+    --reread-soft: rgba(165, 148, 214, 0.17);
+    --away: #77736b;
+    --reader-bg: #151618;
+    --reader-fg: #e2ddd3;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 16px rgba(0, 0, 0, 0.25);
+    color-scheme: dark;
   }
 }
 
+:root[data-theme="dark"] {
+  --bg: #131416;
+  --surface: #1a1b1e;
+  --surface-2: #222327;
+  --fg: #e6e2da;
+  --muted: #a39e94;
+  --faint: #6d6960;
+  --border: #2c2d31;
+  --accent: #7fb3b5;
+  --accent-hover: #96c4c6;
+  --accent-fg: #0f1415;
+  --accent-soft: rgba(127, 179, 181, 0.14);
+  --read: #86b892;
+  --read-soft: rgba(134, 184, 146, 0.16);
+  --skim: #d6ae5a;
+  --skim-soft: rgba(214, 174, 90, 0.26);
+  --skip: #d98a8a;
+  --skip-soft: rgba(217, 138, 138, 0.26);
+  --reread: #a594d6;
+  --reread-soft: rgba(165, 148, 214, 0.17);
+  --away: #77736b;
+  --reader-bg: #151618;
+  --reader-fg: #e2ddd3;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 16px rgba(0, 0, 0, 0.25);
+  color-scheme: dark;
+}
+
+:root[data-theme="sepia"] {
+  --bg: #f1e8d6;
+  --surface: #f8f1e3;
+  --surface-2: #ebe0ca;
+  --fg: #3b3024;
+  --muted: #76664f;
+  --faint: #a8977c;
+  --border: #dfd1b6;
+  --accent: #8a5a2b;
+  --accent-hover: #74481f;
+  --accent-fg: #fff8ec;
+  --accent-soft: #eadbc0;
+  --reader-bg: #f4ecdb;
+  --reader-fg: #3b3024;
+  color-scheme: light;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-border: var(--border);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-read: var(--read);
+  --color-skim: var(--skim);
+  --color-skip: var(--skip);
+  --color-reread: var(--reread);
+  --color-away: var(--away);
+  --font-sans: var(--font-ui);
+  --font-serif: var(--font-reader-serif);
+  --font-hyper: var(--font-reader-hyper);
+}
+
+html,
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+body {
+  font-family: var(--font-ui), system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Gentle, consistent focus ring */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 10px;
+  padding: 0.55rem 1rem;
+  font-size: 0.9rem;
+  font-weight: 500;
+  transition: background 120ms ease, border-color 120ms ease, opacity 120ms ease;
+  white-space: nowrap;
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.btn-primary:disabled {
+  /* clearly "not available yet", not a faded version of the active button */
+  background: var(--surface-2);
+  color: var(--faint);
+  box-shadow: inset 0 0 0 1px var(--border);
+  opacity: 1;
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+.btn-ghost {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--border);
+}
+.btn-ghost:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.input {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.6rem 0.8rem;
+  font-size: 0.95rem;
+  color: var(--fg);
+}
+.input::placeholder {
+  color: var(--faint);
+}
+.input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.label {
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border-radius: 999px;
+  padding: 0.15rem 0.6rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+/* ------------------------------------------------------------------
+   Reader
+------------------------------------------------------------------- */
+.reader-surface {
+  background: var(--reader-bg);
+  color: var(--reader-fg);
+}
+
+.reader-columns {
+  /* Each CSS column is one "page". We slide between them with translateX. */
+  column-fill: auto;
+  height: 100%;
+}
+
+.reader-columns p {
+  margin: 0 0 1em 0;
+  /* No auto-hyphenation: a word split across two lines would confuse line measurement. */
+  hyphens: manual;
+  -webkit-hyphens: manual;
+  text-align: left;
+}
+.reader-columns h2 {
+  font-weight: 650;
+  margin: 0.2em 0 0.8em;
+  break-after: avoid;
+  letter-spacing: -0.01em;
+}
+
+/* The "your place was here" marker: soft, never flashing */
+@keyframes marker-in {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+.place-marker {
+  animation: marker-in 400ms ease-out both;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.fade-in {
+  animation: fade-in 300ms ease-out both;
+}
+
+@keyframes pulse-ring {
+  0% {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .place-marker,
+  .fade-in {
+    animation: none;
+  }
 }
