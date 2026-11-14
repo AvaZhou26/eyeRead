@@ -466,7 +466,14 @@ import { OneEuroFilter } from "../../src/lib/gaze/oneEuro";
     }
     hmm.predict(dt, sweep);
     hmm.observe(obs, !f.face, dt);
-    if (obs) hmm.adaptBias(obs, dt, eye.lineH);
+    if (obs) {
+      // Slowly learn a vertical offset from confident moments (corrects calibration drift).
+      const b = hmm.best();
+      if (b.index >= 0 && b.prob >= 0.6) {
+        const cap = Math.max(eye.lineH * 3, hmm.sigmaY * 1.5);
+        hmm.learnBias(hmm.offsetFor(obs.y, b.index), dt, -cap, cap);
+      }
+    }
 
     rec.eyeSec += dt;
     rec.activeSec += dt;
