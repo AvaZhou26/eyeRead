@@ -166,6 +166,8 @@ Everything is in a SQLite database file, `data/read-assist.db` (accounts, course
 3. **Which line?** Webcam gaze is only accurate to a few lines, so a *Hidden Markov Model* combines that rough position with how reading works. You stay on a line, and after a big left-jump (a *return sweep*) you're on the next one. It also:
    - learns your calibration drift from the start of every page, since people begin reading at the top line
    - learns whether the gaze is stretched or squashed vertically from the end of every page: when you press **→**, your eyes were on the last line
+   - credits the words near your eyes more than the rest of the line, so reading half of each line shows up as skimming
+   - counts "passes": every jump back to the left margin finishes one pass of a line, and more passes than lines (with the extra time to match) means something was read twice
    - uses short paragraph-ending lines as landmarks
    - treats consecutive webcam frames as weak, correlated evidence, so noise can't overpower the reading-order logic
 4. **What did you read?** Each moment's time is spread over the words on the lines you're probably on.
@@ -179,6 +181,8 @@ Simulation check: `npm run simulate` feeds a fake reader with noisy, offset gaze
 
 Two more tools for working on the tracker:
 - `npm run simulate:pages` reads several pages with a stretched gaze and realistic blinks, and prints how often the line estimate is right.
+- `npm run simulate:behaviors` gives each paragraph a behaviour (read, two kinds of skim, re-read one line, re-read it all, skip) and prints how often the report names it correctly.
+- **Labelled test.** Open the reader with `?test=1`: each page tells you what to do on it, and the recording carries those labels, so `npm run replay` can score reading against skimming against re-reading on a real webcam (TESTING.md, step 3c).
 - **Record and replay.** Switch on **Record eye data** in the reader's gear menu (or open the reader with `?record=1`), read, and a JSON file of the session's eye data downloads when you finish (numbers only, no video). `npm run replay -- file.json --linear` plays it back through the tracker and scores it. This is how to tune the tracker against real webcams instead of the simulation; see TESTING.md, step 3b.
 
 ### Where things live
@@ -196,6 +200,8 @@ Two more tools for working on the tracker:
 | `src/lib/validate.ts` | Checks on data sent by the browser (session reports, form fields) |
 | `scripts/simulate.ts` | Algorithm simulation |
 | `scripts/simulate-pages.ts` | Multi-page simulation (stretched gaze, blinks) |
+| `scripts/simulate-behaviors.ts` | Simulation of reading vs skimming vs re-reading vs skipping |
+| `src/lib/gaze/testProtocol.ts` | The labelled test (`?test=1`): what each page asks for |
 | `scripts/replay.ts` | Plays a recorded session back through the tracker |
 | `src/lib/gaze/recorder.ts` | Records a session's eye data, and the replay logic |
 | `PLAN.md` | Original research and feasibility plan |

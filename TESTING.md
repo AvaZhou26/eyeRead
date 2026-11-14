@@ -75,6 +75,27 @@ The tracker can only be improved against real eye data, and a recording lets the
 
 No webcam handy? `RECORD=sim.json npm run simulate:pages` writes a simulated session you can replay the same way.
 
+## 3c. Labelled test: does it tell reading, skimming and re-reading apart? (8 minutes)
+
+In this test the app tells you what to do on each page, so afterwards we know what really happened and can score the report against it.
+
+1. Use a reading of **8 pages or more** with ordinary paragraphs. Open the reader with `?test=1` added to the address (e.g. `http://localhost:3000/read/<id>?test=1`), turn on the camera and calibrate as usual. Don't resize the window or change the font size during the test.
+2. Each page shows a small instruction at the top. Do exactly that, then press **→**:
+   - **Read this page normally** (every other page)
+   - **Skim this page**: glance over it for the gist
+   - **Read this page twice**: to the end, back to the top, all of it again
+   - **Skip this page**: don't read it, wait two seconds
+   - **Read the first line of each paragraph twice**
+3. Click **Finish session**. The eye-data file downloads (recording is switched on automatically in this mode).
+4. Score it:
+   ```bash
+   npm run replay -- ~/Downloads/read-assist-eye-data-….json
+   ```
+   - ✅ Under **labelled test** there is one row per kind of page: what the report called those paragraphs, how often re-reading was flagged, and the share it got right. The last column is your time on them compared with your normal pace.
+   - In simulation the tracker gets plain reading, quick skimming, skipping and a whole re-read right nearly every time; reading only half of each line about 8 times in 10; a single re-read line about 3 times in 4. Real numbers from a few different people are what we need next.
+
+No webcam handy? `RECORD=test.json npm run simulate:behaviors` writes a simulated labelled test.
+
 ## 4. Pause and resume (one report)
 
 1. Mid-reading, click **Pause** (top right).

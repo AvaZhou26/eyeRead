@@ -15,6 +15,7 @@
 import { readFileSync } from "node:fs";
 import { replay, type GazeRecording } from "../src/lib/gaze/recorder";
 import type { TrackerOptions } from "../src/lib/gaze/readingTracker";
+import { reportedCorrectly, type TestStep } from "../src/lib/gaze/testProtocol";
 
 const args = process.argv.slice(2);
 const files = args.filter((a) => !a.startsWith("--"));
@@ -57,6 +58,30 @@ for (const file of files) {
 
   const r = res.report;
   const count = (s: string) => r.paragraphs.filter((p) => p.status === s).length;
+
+  // A labelled test (?test=1) says what the reader really did with each paragraph: score it.
+  const labels = rec.meta.labels as (TestStep | null)[] | undefined;
+  if (Array.isArray(labels)) {
+    const steps: TestStep[] = ["read", "skim", "skip", "reread", "rereadLines"];
+    console.log("\nlabelled test (paragraphs of 8+ words):");
+    console.log("what you did      n   reported: read  skimmed  skipped   flagged re-read   right   time vs your normal pace");
+    let right = 0, total = 0;
+    for (const step of steps) {
+      const rows = r.paragraphs.filter((p, i) => labels[i] === step && p.words >= 8);
+      if (!rows.length) continue;
+      const n = rows.length;
+      const c = (s: string) => rows.filter((p) => p.status === s).length;
+      const ok = rows.filter((p) => reportedCorrectly(step, p.status, p.rereads)).length;
+      // Median time spent, as a multiple of the expected time: shows how this reader's own
+      // skimming and re-reading compare with their reading (the read/skim line is at 0.35×).
+      const ratios = rows.map((p) => p.dwellSec / Math.max(0.1, p.expectedSec)).sort((a, b) => a - b);
+      const med = ratios[ratios.length >> 1];
+      right += ok;
+      total += n;
+      console.log(`${step.padEnd(13)} ${String(n).padStart(5)}          ${pct(c("read") / n)}     ${pct(c("skimmed") / n)}     ${pct(c("skipped") / n)}            ${pct(rows.filter((p) => p.rereads > 0).length / n)}    ${pct(ok / n)}    ${med.toFixed(2)}×`);
+    }
+    if (total) console.log(`overall: ${pct(right / total).trim()} of ${total} labelled paragraphs reported correctly`);
+  }
   console.log(
     `report: coverage ${r.coveragePct}% · focus ${r.focusPct}% · ${r.avgWpm ?? "–"} wpm · paragraphs read ${count("read")} / skimmed ${count("skimmed")} / skipped ${count("skipped")}` +
       ` · re-read ${r.paragraphs.filter((p) => p.rereads > 0).length} · distractions ${r.distractions.length}`,

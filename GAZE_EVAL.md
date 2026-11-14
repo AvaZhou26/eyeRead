@@ -11,6 +11,22 @@ Two other changes went in at the same time (neither has been tested with a real 
 - **Hybrid engine in the reader, opt-in:** `?gaze=hybrid` (or `NEXT_PUBLIC_GAZE_ENGINE=hybrid`). WebEyeTrack runs unadapted and its two raw numbers are added to our 14 features before the ridge fit, as in the lab's "Hybrid" row. It is only used when it does at least as well vertically as the plain model on that calibration's validation dots; otherwise the plain model is used. Whenever WebEyeTrack has no fresh result for a frame, the plain model answers for that frame.
 - **Record and replay** (`src/lib/gaze/recorder.ts`, `scripts/replay.ts`, TESTING.md step 3b). This is the way to settle engine and tuning questions with real data: record the same kind of steady read with each engine and compare the replay scores.
 
+**Update (2026-11-14, afternoon): telling reading, skimming and re-reading apart.** Until now everything was decided from one number, time per line, so two things went wrong: reading only the first half of every line counted as "read", and a line read twice was never flagged (re-reading needed a jump of two or more lines back). Changes, checked with `npm run simulate:behaviors` (noise 80 px, 1,600+ paragraphs):
+
+| What the reader did | Reported correctly before | After |
+|---|---|---|
+| Read normally | 100% | 99 to 100% |
+| Quick skim | 100% | 100% |
+| Read half of each line, then drop down | 15% | about 80% |
+| One line read twice | 0% | about 78% |
+| Whole paragraph read twice | 100% | 100% |
+| Skipped | 98% | 100% |
+
+- **Words near the eyes get the credit.** A frame's time on a line used to be split evenly over the line's words. Now 40% is split evenly and 60% goes to the words near the gaze's left-right position. Tested with a sideways calibration offset of up to 120 px either way without normal reading being misreported.
+- **Passes.** Every jump back to the left margin (and every forward page turn) finishes one pass of a line. A paragraph with at least half a line's worth of extra passes, and the extra time to match, is flagged as re-read.
+- **Tried and dropped:** using where the eyes land after the jump (next line, same line, a line above) to steer the line model directly. At webcam noise the landing height can't separate "same line" from "next line", it made no difference to any score, and waiting to measure it cost line accuracy.
+- **Labelled test** (`?test=1`, TESTING.md 3c): the same scoring on a real webcam. Still to do with that data: learn each reader's own skim pace during calibration instead of the fixed 35% line.
+
 ## WebEyeTrack: what it is and what it needs
 
 | | |

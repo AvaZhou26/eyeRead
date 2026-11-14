@@ -12,6 +12,7 @@ import { loadPace, type AxisMap } from "@/lib/gaze/readingCalibration";
 import { OneEuroFilter } from "@/lib/gaze/oneEuro";
 import { ReadingTracker, type MarkerInfo, type ToastInfo, type TrackingMode } from "@/lib/gaze/readingTracker";
 import { calibrationMeta, GazeRecorder } from "@/lib/gaze/recorder";
+import { labelsFor, STEP_TEXT, stepForPage } from "@/lib/gaze/testProtocol";
 import type { ReadingState, ResumeState, SessionReport } from "@/lib/types";
 import { useTheme, type ThemeChoice } from "@/components/ThemeToggle";
 import { IconBug, IconChevronLeft, IconChevronRight, IconSettings, IconX } from "@/components/icons";
@@ -40,7 +41,19 @@ const BOTTOM_BAR = 60;
 const RECORD_KEY = "ra-record";
 function recordingWanted(): boolean {
   try {
-    return new URLSearchParams(window.location.search).get("record") === "1" || localStorage.getItem(RECORD_KEY) === "1";
+    return new URLSearchParams(window.location.search).get("record") === "1" || localStorage.getItem(RECORD_KEY) === "1" || labelledTestWanted();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Developer tool: the labelled tracker test (?test=1). Each page shows what to do on it
+ * (read, skim, read twice, skip), and the recording carries those labels so it can be scored.
+ */
+function labelledTestWanted(): boolean {
+  try {
+    return new URLSearchParams(window.location.search).get("test") === "1";
   } catch {
     return false;
   }
@@ -138,6 +151,7 @@ export function ReaderView({
   // ReaderView only ever renders in the browser (after camera setup), so reading the URL here is safe.
   const [recording, setRecording] = useState(() => initialMode !== "none" && recordingWanted());
   const recorderRef = useRef<GazeRecorder | null>(null);
+  const [labelledTest] = useState(() => initialMode === "gaze" && labelledTestWanted());
 
   const innerRef = useRef<HTMLDivElement>(null);
   const trackerRef = useRef<ReadingTracker | null>(null);
@@ -473,6 +487,8 @@ export function ReaderView({
     const rec = recorderRef.current;
     if (!rec || rec.frameCount === 0) return;
     rec.setMeta({ calibration: calibrationMeta(calibRef.current), savedAt: new Date().toISOString() });
+    // Labelled test: which step each paragraph was read under (from the page it sits on).
+    if (labelledTest && layout) rec.setMeta({ labels: labelsFor(layout.byPage, paragraphs.length) });
     const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
     downloadJson(`read-assist-eye-data-${stamp}.json`, rec);
   }
@@ -562,6 +578,16 @@ export function ReaderView({
           </button>
         </div>
       </header>
+
+      {/* Labelled tracker test (?test=1): what to do on this page */}
+      {labelledTest && mode === "gaze" && (
+        <div className="absolute left-1/2 -translate-x-1/2 z-20 text-center pointer-events-none" style={{ top: TOP_BAR - 4, width: pageW }}>
+          <span className="inline-block rounded-md px-3 py-1 text-xs bg-surface border border-border shadow-sm">
+            <b>Test, page {page + 1}: {STEP_TEXT[stepForPage(page)].title}.</b>{" "}
+            <span className="text-muted">{STEP_TEXT[stepForPage(page)].detail}</span>
+          </span>
+        </div>
+      )}
 
       {/* Pages */}
       <div className="absolute overflow-hidden" style={{ left: pageLeft, top: pageTop, width: pageW, height: pageH, zIndex: 1 }}>
