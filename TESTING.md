@@ -116,6 +116,10 @@ Back in the teacher window, refresh the course page.
    - **Show on page** colors each paragraph green, yellow or red.
 7. No camera is needed: it measures what's on screen while you're active.
    - **Start eye-tracked reading** in the popup is an experimental camera mode. It's untested with a real webcam, so expect rough edges.
+8. **Bring it into your student account:** sign in to Read Assist as a student and open the home page.
+   - ✅ The first time, a box asks "Add your web reading to Read Assist?" Click **Allow**.
+   - ✅ The articles appear under **Your own readings** with the site, reading time and a "Read N%" pill. Click one for a paragraph-by-paragraph view, a link back to the article and **Remove**.
+   - After that, new or re-read articles come in each time you open the home page. Only short snippets of each paragraph are saved, not the article.
 
 ---
 

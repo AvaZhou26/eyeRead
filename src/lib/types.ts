@@ -169,3 +169,30 @@ export interface ClassDigest {
   generatedBy: "gemini" | "fallback";
   createdAt: string;
 }
+
+/**
+ * An article read on another website (e.g. the WSJ) and measured by the Read Assist browser
+ * extension, then imported into the student's account. Simpler than a Session: the extension
+ * only knows per-paragraph read / skimmed / skipped and the time spent.
+ */
+export interface WebReading {
+  id: string;
+  userId: string;
+  url: string;
+  title: string;
+  site: string;
+  firstSeen: string;
+  lastSeen: string;
+  importedAt: string;
+  totalWords: number;
+  coveragePct: number;
+  /** Seconds actively on the page (eyes on page when eye tracking was on). */
+  activeSec: number;
+  /** Of activeSec, seconds measured with eye tracking. */
+  eyeSec: number;
+  wordsRead: number;
+  wordsSkimmed: number;
+  wordsSkipped: number;
+  /** In article order. Headings have status null. `text` is the first ~100 characters. */
+  paragraphs: { status: CoverageStatus | null; words: number; text: string }[];
+}

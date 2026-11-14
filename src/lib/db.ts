@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { createClient, type Client, type InStatement, type Row } from "@libsql/client";
-import type { ClassDigest, Course, LessonPlan, Reading, ResumeState, Session, SessionStatus, User } from "./types";
+import type { ClassDigest, Course, LessonPlan, Reading, ResumeState, Session, SessionStatus, User, WebReading } from "./types";
 import { countWords, toParagraphs } from "./text";
 import { SAMPLE_TEXT, SAMPLE_TITLE } from "./sample";
 import { normalizeReport } from "./validate";
@@ -27,6 +27,11 @@ function makeJoinCode(): string {
 }
 
 // ---------- connection + schema ----------
+// Articles read on other sites, imported from the browser extension (see WebReading).
+const WEB_READINGS_SCHEMA = `CREATE TABLE IF NOT EXISTS web_readings (
+     id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), url TEXT NOT NULL, title TEXT NOT NULL,
+     site TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, imported_at TEXT NOT NULL,
+     coverage_pct REAL NOT NULL, active_sec REAL NOT NULL, data TEXT NOT NULL, UNIQUE (user_id, url))`;
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS users (
@@ -54,6 +59,7 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS lesson_plans (
      reading_id TEXT PRIMARY KEY REFERENCES readings(id), text TEXT NOT NULL, generated_by TEXT NOT NULL,
      created_at TEXT NOT NULL, based_on_sessions INTEGER NOT NULL)`,
+  WEB_READINGS_SCHEMA,
 ];
 
 const g = globalThis as unknown as { __raClient?: Client; __raReady?: Promise<void> };
@@ -476,4 +482,67 @@ export async function closePausedSessions(userId: string, readingId: string) {
     sql: "UPDATE sessions SET status = 'done', resume = NULL WHERE user_id = ? AND reading_id = ? AND status = 'paused'",
     args: [userId, readingId],
   });
+}
+
+// ---------- articles imported from the browser extension ----------
+// The table is also created here (not only at start-up) so a running server picks it up
+// without a restart.
+let webTableReady: Promise<unknown> | null = null;
+async function webDb(): Promise<Client> {
+  const c = await db();
+  webTableReady ??= c.execute(WEB_READINGS_SCHEMA).catch((e) => {
+    webTableReady = null;
+    throw e;
+  });
+  await webTableReady;
+  return c;
+}
+
+function toWebReading(r: Row): WebReading {
+  const d = json<Partial<WebReading>>(r.data, {});
+  return {
+    id: String(r.id), userId: String(r.user_id), url: String(r.url), title: String(r.title), site: String(r.site),
+    firstSeen: String(r.first_seen), lastSeen: String(r.last_seen), importedAt: String(r.imported_at),
+    coveragePct: Number(r.coverage_pct), activeSec: Number(r.active_sec),
+    totalWords: d.totalWords ?? 0, eyeSec: d.eyeSec ?? 0, wordsRead: d.wordsRead ?? 0, wordsSkimmed: d.wordsSkimmed ?? 0,
+    wordsSkipped: d.wordsSkipped ?? 0, paragraphs: d.paragraphs ?? [],
+  };
+}
+
+export async function webReadingsFor(userId: string): Promise<WebReading[]> {
+  const { rows } = await (await webDb()).execute({ sql: "SELECT * FROM web_readings WHERE user_id = ? ORDER BY last_seen DESC", args: [userId] });
+  return rows.map(toWebReading);
+}
+
+export async function getWebReading(id: string): Promise<WebReading | null> {
+  const { rows } = await (await webDb()).execute({ sql: "SELECT * FROM web_readings WHERE id = ?", args: [id] });
+  return rows[0] ? toWebReading(rows[0]) : null;
+}
+
+/** Insert or update (by user + URL). An older copy never overwrites a newer one. Returns how many changed. */
+export async function upsertWebReadings(userId: string, items: Omit<WebReading, "id" | "userId" | "importedAt">[]): Promise<number> {
+  if (!items.length) return 0;
+  const c = await webDb();
+  const now = new Date().toISOString();
+  const res = await c.batch(
+    items.map((w) => ({
+      sql: `INSERT INTO web_readings (id,user_id,url,title,site,first_seen,last_seen,imported_at,coverage_pct,active_sec,data)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT (user_id, url) DO UPDATE SET title=excluded.title, site=excluded.site, first_seen=excluded.first_seen,
+              last_seen=excluded.last_seen, imported_at=excluded.imported_at, coverage_pct=excluded.coverage_pct,
+              active_sec=excluded.active_sec, data=excluded.data
+            WHERE excluded.last_seen > web_readings.last_seen`,
+      args: [
+        newId("web"), userId, w.url, w.title, w.site, w.firstSeen, w.lastSeen, now, w.coveragePct, w.activeSec,
+        JSON.stringify({ totalWords: w.totalWords, eyeSec: w.eyeSec, wordsRead: w.wordsRead, wordsSkimmed: w.wordsSkimmed, wordsSkipped: w.wordsSkipped, paragraphs: w.paragraphs }),
+      ],
+    })),
+    "write",
+  );
+  return res.reduce((t, r) => t + r.rowsAffected, 0);
+}
+
+export async function deleteWebReading(id: string, userId: string): Promise<boolean> {
+  const r = await (await webDb()).execute({ sql: "DELETE FROM web_readings WHERE id = ? AND user_id = ?", args: [id, userId] });
+  return r.rowsAffected > 0;
 }

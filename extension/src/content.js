@@ -93,7 +93,8 @@ import { OneEuroFilter } from "../../src/lib/gaze/oneEuro";
 
   // ---------------------------------------------------------------- state
   let key = articleKey(location.href);
-  let paras = []; // { el, text, words, heading, dwell: Float32Array, k }
+  let paras = []; // { el, text, words, heading, dwell: Float32Array, k, id }
+  let paraSeq = 0; // stable id per paragraph object (array indexes shift when the page inserts blocks)
   let byEl = new WeakMap();
   let rec = { activeSec: 0, eyeSec: 0, firstSeen: Date.now(), lastSeen: Date.now() };
   let saved = null; // stored paragraphs (for restoring dwell on a revisit)
@@ -133,7 +134,7 @@ import { OneEuroFilter } from "../../src/lib/gaze/oneEuro";
         // Word count changed a little (e.g. live edit): stretch the old dwell over the new words.
         for (let i = 0; i < b.words; i++) dwell[i] = d[Math.min(d.length - 1, Math.floor((i * d.length) / b.words))] || 0;
       }
-      const p = { ...b, dwell, k: textKey(b.text) };
+      const p = { ...b, dwell, k: textKey(b.text), id: ++paraSeq };
       byEl.set(b.el, p);
       return p;
     });
@@ -330,7 +331,11 @@ import { OneEuroFilter } from "../../src/lib/gaze/oneEuro";
   };
   let linesDirty = true;
   let lastLinesAt = 0;
-  let lineCache = []; // { key, top, bottom, left, right, paragraph, first, last }
+  // Lines in VIEWPORT coordinates (the gaze model predicts viewport points). They are rebuilt
+  // after any scroll (the window's or an inner scroll area's) and every LINES_MAX_AGE_MS, so
+  // they follow the text when the page scrolls or shifts (ads/images loading above, etc.).
+  let lineCache = []; // { key, top, bottom, left, right, para, first, last }
+  const LINES_MAX_AGE_MS = 250;
 
   function medianLineHeight() {
     const hs = [];
@@ -344,14 +349,18 @@ import { OneEuroFilter } from "../../src/lib/gaze/oneEuro";
     return hs.length ? hs[hs.length >> 1] : 24;
   }
 
-  /** Text lines (document coordinates) of the paragraphs near the viewport. */
+  /**
+   * Text lines (viewport coordinates) that are on screen right now. Off-screen lines are left
+   * out on purpose: you can't be reading them, and keeping them let the model hold on to the
+   * top of the article after you'd scrolled past it.
+   */
   function buildLines() {
-    const sx = window.scrollX, sy = window.scrollY, vh = window.innerHeight;
+    const vh = window.innerHeight, vw = window.innerWidth;
     const out = [];
-    paras.forEach((p, pi) => {
+    paras.forEach((p) => {
       if (p.heading) return;
       const r = p.el.getBoundingClientRect();
-      if (r.bottom < -vh * 0.5 || r.top > vh * 1.5) return;
+      if (r.bottom <= 0 || r.top >= vh) return;
       const range = document.createRange();
       range.selectNodeContents(p.el);
       const rects = [...range.getClientRects()].filter((q) => q.width > 2 && q.height > 4);
@@ -372,13 +381,16 @@ import { OneEuroFilter } from "../../src/lib/gaze/oneEuro";
         const first = Math.floor((acc / totalW) * p.words);
         acc += w.right - w.left;
         const last = Math.max(first, Math.ceil((acc / totalW) * p.words) - 1);
+        // Only lines at least half visible (and not scrolled sideways out of view).
+        const visH = Math.min(w.bottom, vh) - Math.max(w.top, 0);
+        if (visH < (w.bottom - w.top) * 0.5 || w.right <= 0 || w.left >= vw) return;
         out.push({
-          key: pi + ":" + li,
-          top: w.top + sy,
-          bottom: w.bottom + sy,
-          left: w.left + sx,
-          right: w.right + sx,
-          paragraph: pi,
+          key: p.id + ":" + li,
+          top: w.top,
+          bottom: w.bottom,
+          left: w.left,
+          right: w.right,
+          para: p,
           first,
           last: Math.min(p.words - 1, last),
         });
@@ -395,15 +407,24 @@ import { OneEuroFilter } from "../../src/lib/gaze/oneEuro";
     lineCache = fresh;
     hmm.lines = fresh.map((l, i) => ({
       index: i, page: 0, top: l.top, bottom: l.bottom, left: l.left, right: l.right,
-      firstWord: l.first, lastWord: l.last, paragraph: l.paragraph,
+      firstWord: l.first, lastWord: l.last, paragraph: l.para.id,
     }));
     const p = new Float64Array(fresh.length + 1);
     let carried = 0;
+    const fresh0 = [];
     fresh.forEach((l, i) => {
-      p[i] = oldP.get(l.key) || 0;
-      carried += p[i];
+      if (oldP.has(l.key)) {
+        p[i] = oldP.get(l.key);
+        carried += p[i];
+      } else fresh0.push(i);
     });
     if (carried < 1e-6) p.fill(1); // nothing to carry over: spread evenly
+    else if (fresh0.length) {
+      // Lines that just scrolled into view start with a fair share, so the gaze can claim
+      // them right away instead of the model waiting for a rare "jump" to reach them.
+      const share = (carried + off) / fresh.length;
+      for (const i of fresh0) p[i] = share;
+    }
     p[fresh.length] = Math.max(off, 0.02);
     const s = p.reduce((a, b) => a + b, 0) || 1;
     for (let i = 0; i < p.length; i++) p[i] /= s;
@@ -411,7 +432,9 @@ import { OneEuroFilter } from "../../src/lib/gaze/oneEuro";
     linesDirty = false;
     lastLinesAt = now();
   }
-  window.addEventListener("scroll", () => (linesDirty = true), { passive: true });
+  // capture: scroll events from inner scroll areas don't bubble, but they do pass the window
+  // in the capture phase. Many news sites scroll a container, not the window.
+  window.addEventListener("scroll", () => (linesDirty = true), { passive: true, capture: true });
   window.addEventListener("resize", () => (linesDirty = true), { passive: true });
 
   function onEyeFrame(f) {
@@ -421,14 +444,14 @@ import { OneEuroFilter } from "../../src/lib/gaze/oneEuro";
     const dt = eye.lastT === null ? 1 / 30 : Math.min(0.2, Math.max(0.001, f.t - eye.lastT));
     eye.lastT = f.t;
     if (document.visibilityState !== "visible") return;
-    if (linesDirty && now() - lastLinesAt > 150) refreshLines();
+    if (linesDirty || now() - lastLinesAt > LINES_MAX_AGE_MS) refreshLines();
     const hmm = eye.hmm;
     if (!hmm.lines.length) return;
 
     let obs = null, sweep = false;
     if (f.features) {
       const g = eye.model.predict(f.features);
-      obs = { x: eye.fx.filter(g.x, f.t) + window.scrollX, y: eye.fy.filter(g.y, f.t) + window.scrollY };
+      obs = { x: eye.fx.filter(g.x, f.t), y: eye.fy.filter(g.y, f.t) };
       // Return sweep: a fast leftward jump of ≥40% of the column within ~0.35 s.
       const qx = eye.qx.filter(g.x, f.t);
       eye.hist.push({ t: f.t, x: qx });
@@ -454,8 +477,8 @@ import { OneEuroFilter } from "../../src/lib/gaze/oneEuro";
       const pr = hmm.p[i];
       if (pr < 0.02) continue;
       const l = lineCache[i];
-      const p = paras[l.paragraph];
-      if (!p) continue;
+      const p = l.para;
+      if (!byEl.has(p.el) || byEl.get(p.el) !== p) continue; // paragraph was replaced by a rescan
       const n = l.last - l.first + 1;
       const add = (pr * dt) / n;
       for (let w = l.first; w <= l.last; w++) p.dwell[w] += add;
@@ -645,6 +668,107 @@ import { OneEuroFilter } from "../../src/lib/gaze/oneEuro";
     dirty = true;
     save();
   }
+
+  // ---------------------------------------------------------------- Read Assist account bridge
+  // The Read Assist home page (a student's dashboard) says hello with window.postMessage.
+  // If the student has allowed that site, we hand it the articles measured elsewhere; the
+  // page uploads them to the account with its own sign-in. The extension never logs in.
+  // Any page could send this hello, so nothing is shared until the student clicks Allow in a
+  // box the page can't reach into (closed shadow root, trusted clicks only).
+  const APPS_KEY = "ra:apps"; // { [origin]: true } sites allowed to receive your reading history
+  const SYNC_KEY = "ra:synced"; // { [origin|account]: { [articleKey]: lastSeen already handed over } }
+  const APP_SRC = "read-assist-app", EXT_SRC = "read-assist-ext";
+  let consent = null; // Promise<boolean> while/after asking on this page load
+  const pendingSync = new Map(); // id → { account, sent: { [articleKey]: lastSeen } }
+  const toPage = (msg) => window.postMessage({ source: EXT_SRC, ...msg }, location.origin);
+
+  function askToConnect() {
+    return new Promise((resolve) => {
+      const host = document.createElement("div");
+      host.style.cssText = "position:fixed;inset:0;z-index:2147483647";
+      const root = host.attachShadow({ mode: "closed" });
+      const site = location.host.replace(/[<>&"]/g, "");
+      root.innerHTML = `
+        <style>
+          *{box-sizing:border-box;font-family:system-ui,-apple-system,Segoe UI,sans-serif}
+          .veil{position:fixed;inset:0;background:rgba(28,25,23,.35);display:flex;align-items:center;justify-content:center;padding:16px}
+          .card{max-width:420px;background:#fff;color:#1c1917;border-radius:14px;padding:22px;box-shadow:0 10px 30px rgba(0,0,0,.2);font-size:15px;line-height:1.5}
+          h2{margin:0 0 8px;font-size:17px} p{margin:0 0 14px;color:#44403c}
+          button{font:inherit;font-size:14px;border-radius:8px;border:1px solid #d6d3d1;background:#fff;padding:8px 14px;cursor:pointer;margin-right:8px}
+          button.primary{background:#1c1917;color:#fff;border-color:#1c1917}
+        </style>
+        <div class="veil" role="dialog" aria-modal="true" aria-labelledby="t"><div class="card">
+          <h2 id="t">Add your web reading to Read Assist?</h2>
+          <p><b>${site}</b> is asking for the articles the Read Assist extension measured on other sites: each article's title, link, how much you read and a short snippet of each paragraph. They'll appear under "Your own readings" in your account.</p>
+          <button class="primary" data-a="1">Allow</button><button data-a="0">Not now</button>
+        </div></div>`;
+      const done = (ok) => {
+        host.remove();
+        resolve(ok);
+      };
+      root.addEventListener("click", (e) => {
+        const b = e.target.closest?.("button");
+        if (b && e.isTrusted) done(b.dataset.a === "1");
+      });
+      document.documentElement.appendChild(host);
+      root.querySelector("button.primary").focus();
+    });
+  }
+
+  async function articlesToSync(account) {
+    const all = await chrome.storage.local.get(null);
+    const synced = (all[SYNC_KEY] || {})[location.origin + "|" + account] || {};
+    const out = [], sent = {};
+    for (const [k, rec] of Object.entries(all)) {
+      if (!k.startsWith("art:") || !rec?.paras) continue;
+      if (rec.url?.startsWith(location.origin)) continue; // pages of Read Assist itself
+      if ((synced[k] || 0) >= (rec.lastSeen || 0)) continue; // already handed over, unchanged
+      const rep = buildReport(rec);
+      out.push({
+        url: rec.url, title: rep.title, site: rep.site, firstSeen: rec.firstSeen, lastSeen: rec.lastSeen,
+        coveragePct: rep.coveragePct, activeSec: rec.activeSec || 0, eyeSec: rec.eyeSec || 0,
+        paragraphs: rep.paragraphs.map((p) => ({ heading: p.heading, status: p.status, words: p.words, text: p.text.slice(0, 100) })),
+      });
+      sent[k] = rec.lastSeen || 0;
+    }
+    return { out, sent };
+  }
+
+  window.addEventListener("message", async (e) => {
+    if (e.source !== window || e.origin !== location.origin) return;
+    const d = e.data;
+    if (!d || d.source !== APP_SRC) return;
+    const account = typeof d.account === "string" ? d.account.slice(0, 100) : "";
+    if (!account) return;
+    try {
+      const apps = (await chrome.storage.local.get(APPS_KEY))[APPS_KEY] || {};
+      if (d.type === "hello") {
+        if (!apps[location.origin]) {
+          if (!consent) {
+            toPage({ type: "status", state: "asking" });
+            consent = askToConnect();
+          }
+          if (!(await consent)) return toPage({ type: "status", state: "declined" });
+          const now = (await chrome.storage.local.get(APPS_KEY))[APPS_KEY] || {};
+          if (!now[location.origin]) await chrome.storage.local.set({ [APPS_KEY]: { ...now, [location.origin]: true } });
+        }
+        const { out, sent } = await articlesToSync(account);
+        const id = Math.random().toString(36).slice(2);
+        pendingSync.set(id, { account, sent });
+        toPage({ type: "articles", id, articles: out });
+      } else if (d.type === "imported" && apps[location.origin] && pendingSync.get(d.id)?.account === account) {
+        // The page saved them to the account: don't send these versions again.
+        const { sent } = pendingSync.get(d.id);
+        pendingSync.delete(d.id);
+        const all = (await chrome.storage.local.get(SYNC_KEY))[SYNC_KEY] || {};
+        const slot = location.origin + "|" + account;
+        all[slot] = { ...(all[slot] || {}), ...sent };
+        await chrome.storage.local.set({ [SYNC_KEY]: all });
+      }
+    } catch {
+      toPage({ type: "status", state: "error" }); // e.g. the extension was reloaded under this page
+    }
+  });
 
   // ---------------------------------------------------------------- lifecycle
   let scanTimer = 0;

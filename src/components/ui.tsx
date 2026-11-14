@@ -29,6 +29,18 @@ export function OverduePill() {
 }
 
 /** Progress pill. Pass the student's BEST session for a reading (see bestOf). */
+/** "Read N%" pill, colored like StatusPill (for readings without a Session, e.g. web articles). */
+export function CoveragePill({ pct }: { pct: number }) {
+  const v = Math.round(pct);
+  const color = v >= FINISHED_PCT ? "var(--read)" : v >= 50 ? "var(--skim)" : "var(--skip)";
+  return (
+    <span className="pill" style={{ color, background: `color-mix(in srgb, ${color} 14%, transparent)` }}>
+      <span className="h-1.5 w-1.5 rounded-full" style={{ background: color }} />
+      Read {v}%
+    </span>
+  );
+}
+
 export function StatusPill({ session, attempts }: { session: Session | null | undefined; attempts?: number }) {
   if (!session) return <span className="pill">Not started</span>;
   const pct = Math.round(session.report.coveragePct);

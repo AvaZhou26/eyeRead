@@ -1,13 +1,14 @@
 import Link from "next/link";
 import { requireUser } from "@/lib/auth";
-import { coursesForUser, personalReadings, readingsForCourses, sessionsFor, sessionsForReadings, studentCounts } from "@/lib/db";
+import { coursesForUser, personalReadings, readingsForCourses, sessionsFor, sessionsForReadings, studentCounts, webReadingsFor } from "@/lib/db";
 import { bestOf, bestPerStudent, plural, readingHabits, studentSummary } from "@/lib/insights";
 import { estimateMinutes, formatDate, formatDueDate, formatDuration } from "@/lib/text";
 import type { Reading, Session, User } from "@/lib/types";
 import { PageHeader } from "@/components/AppShell";
 import { CreateCourseForm, JoinCourseForm } from "@/components/CourseForms";
-import { BestTag, EmptyState, HabitCard, OverduePill, RowLink, Section, Stat, StatusPill, isOverdue } from "@/components/ui";
-import { IconBook, IconClock, IconPlus, IconSparkle, IconUsers } from "@/components/icons";
+import { ExtensionSync } from "@/components/ExtensionSync";
+import { BestTag, CoveragePill, EmptyState, HabitCard, OverduePill, RowLink, Section, Stat, StatusPill, isOverdue } from "@/components/ui";
+import { IconBook, IconClock, IconMonitor, IconPlus, IconSparkle, IconUsers } from "@/components/icons";
 
 export default async function Dashboard() {
   const user = await requireUser();
@@ -24,6 +25,7 @@ async function StudentDashboard({ user }: { user: User }) {
   const courseReadings = await readingsForCourses(courses.map((c) => c.id));
   const courseById = new Map(courses.map((c) => [c.id, c]));
   const mine = await personalReadings(user.id);
+  const web = await webReadingsFor(user.id);
   const allMine = await sessionsFor(user.id);
   const byReading = (id: string) => allMine.filter((s) => s.readingId === id);
   const readingsById = new Map<string, Reading>([...courseReadings, ...mine].map((r) => [r.id, r]));
@@ -137,7 +139,7 @@ async function StudentDashboard({ user }: { user: User }) {
         </Section>
 
         <Section title="Your own readings">
-          {mine.length === 0 ? (
+          {mine.length === 0 && web.length === 0 ? (
             <EmptyState>
               Paste text, upload a PDF, or snap photos of pages to practice with your own material.{" "}
               <Link href="/readings/new" className="text-accent underline underline-offset-2">Upload one</Link>
@@ -153,8 +155,21 @@ async function StudentDashboard({ user }: { user: User }) {
                   <StatusPill session={bestOf(byReading(r.id))} attempts={byReading(r.id).length} />
                 </RowLink>
               ))}
+              {web.map((w) => (
+                <RowLink key={w.id} href={`/web-readings/${w.id}`}>
+                  <IconMonitor size={16} className="text-muted shrink-0" aria-hidden />
+                  <div className="min-w-0 flex-1">
+                    <div className="font-medium truncate">{w.title}</div>
+                    <div className="text-sm text-muted truncate">
+                      {w.site} · {formatDate(w.lastSeen)} · {formatDuration(w.activeSec)} reading
+                    </div>
+                  </div>
+                  <CoveragePill pct={w.coveragePct} />
+                </RowLink>
+              ))}
             </div>
           )}
+          <ExtensionSync account={user.id} />
         </Section>
       </div>
 
